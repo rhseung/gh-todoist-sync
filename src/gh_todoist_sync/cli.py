@@ -9,7 +9,7 @@ import typer
 from . import agent, gh, todoist
 from .reconcile import COMPLETE_CAP, SyncError, reconcile
 
-app = typer.Typer(add_completion=False, help="Mirror GitHub work assigned to me into Todoist.")
+app = typer.Typer(help="Mirror GitHub work assigned to me into Todoist.")
 
 
 @app.callback(invoke_without_command=True)
