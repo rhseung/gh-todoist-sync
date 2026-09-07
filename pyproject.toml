@@ -1,0 +1,42 @@
+[project]
+name = "gh-todoist-sync"
+version = "0.1.0"
+description = "Mirror GitHub issues and PRs assigned to you into Todoist, on a launchd timer"
+readme = "README.md"
+license = { text = "MIT" }
+keywords = ["github", "todoist", "sync", "launchd", "cli"]
+authors = [
+    { name = "Hyunseung Ryu", email = "ryu@rhseung.me" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "httpx>=0.28.1",
+    "typer>=0.27.2",
+]
+
+[project.scripts]
+gh-todoist-sync = "gh_todoist_sync:main"
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM", "RUF", "PL", "PERF", "RET", "PTH"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004"]   # magic numbers are the point of a test
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
