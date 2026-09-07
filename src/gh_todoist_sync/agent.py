@@ -34,6 +34,9 @@ def plist(interval: int = DEFAULT_INTERVAL) -> dict[str, object]:
         "ProgramArguments": [_executable(), "sync"],
         "EnvironmentVariables": {"PATH": PATH},
         "StartInterval": interval,
+        # Without this the first run is one whole interval after login, which
+        # wastes the moment the machine is most likely to be out of date.
+        "RunAtLoad": True,
         "StandardOutPath": str(LOG),
         "StandardErrorPath": str(LOG),
         # Background keeps it off the foreground scheduler; the run is almost
