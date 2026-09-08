@@ -5,7 +5,7 @@ Nothing here imports an SDK, so the pure logic and its tests stay cheap.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 ROOT_NAME = "GitHub"
@@ -16,6 +16,9 @@ MARKER_ROOT = "gh-root: 1"
 MARKER_ORG = "gh-org-id: "
 MARKER_REPO = "gh-repo-id: "
 MARKER_TASK = "gh-id: "
+# Stamped on a section or sub-project the moment it is first seen empty, so the
+# grace period survives between runs without a local state file.
+MARKER_EMPTY = "gh-empty-since: "
 
 # Todoist's API priority runs backwards from the p1..p4 labels in the UI.
 PRIORITY_ISSUE = 1  # p4
@@ -84,6 +87,10 @@ class Snapshot:
     orgs: dict[str, ProjectInfo]  # owner_id -> sub-project
     sections: dict[tuple[str, str], SectionInfo]  # (project_id, repo_id) -> section
     tasks: dict[str, TaskInfo]  # gh_id -> task
+    # Every task counts here, marked or not: deleting a container takes whatever
+    # is inside it, so a hand written note is enough to keep one alive.
+    occupied: frozenset[str] = frozenset()  # project and section ids holding a task
+    empty_since: dict[str, date] = field(default_factory=dict)  # id -> first seen empty
 
 
 def marker_value(description: str | None, prefix: str) -> str | None:

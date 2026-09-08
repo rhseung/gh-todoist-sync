@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -18,11 +18,13 @@ from gh_todoist_sync.models import (
     marker_value,
 )
 from gh_todoist_sync.reconcile import (
+    GRACE_DAYS,
     SyncError,
     reconcile,
 )
 
 ROOT = ProjectInfo("R", "GitHub")
+TODAY = date(2026, 9, 8)
 
 
 def item(**overrides) -> Item:
@@ -49,6 +51,7 @@ def settled(one: Item) -> Snapshot:
         orgs={},
         sections={("R", one.repo_id): SectionInfo("S", one.repo_name, "R")},
         tasks={one.gh_id: TaskInfo("T", one.content, "R", "S", one.priority, one.deadline)},
+        occupied=frozenset({"R", "S"}),
     )
 
 
@@ -135,3 +138,62 @@ def test_task_in_the_wrong_section_is_moved():
     snap = settled(one)
     snap.tasks[one.gh_id] = TaskInfo("T", one.content, "R", "ELSEWHERE", one.priority, one.deadline)
     assert kinds(reconcile([one], snap)) == ["MoveTask"]
+
+
+def empty_section(empty_since: date | None) -> Snapshot:
+    """A section Todoist still has but GitHub has nothing for."""
+    return Snapshot(
+        root=ROOT,
+        orgs={},
+        sections={("R", "1"): SectionInfo("S", "rds", "R")},
+        tasks={},
+        occupied=frozenset(),
+        empty_since={"S": empty_since} if empty_since else {},
+    )
+
+
+def test_newly_empty_section_is_stamped_not_deleted():
+    ops = reconcile([], empty_section(None), today=TODAY)
+    assert kinds(ops) == ["SetDescription"]
+    assert ops[0].description == "gh-repo-id: 1\ngh-empty-since: 2026-09-08"
+
+
+def test_section_inside_the_grace_period_is_left_alone():
+    snap = empty_section(TODAY - timedelta(days=GRACE_DAYS - 1))
+    assert reconcile([], snap, today=TODAY) == []
+
+
+def test_section_empty_past_the_grace_period_is_deleted():
+    snap = empty_section(TODAY - timedelta(days=GRACE_DAYS))
+    ops = reconcile([], snap, today=TODAY)
+    assert kinds(ops) == ["Delete"]
+    assert (ops[0].id, ops[0].kind) == ("S", "sections")
+
+
+def test_refilled_section_loses_its_stamp():
+    snap = empty_section(TODAY - timedelta(days=99))
+    ops = reconcile([item()], snap, today=TODAY)
+    assert kinds(ops) == ["CreateTask", "SetDescription"]
+    assert ops[1].description == "gh-repo-id: 1"
+
+
+def test_an_unmarked_task_keeps_the_section_alive():
+    # occupied counts every task, so a hand written note is never deleted with
+    # the section around it.
+    stale = empty_section(TODAY - timedelta(days=99))
+    snap = Snapshot(stale.root, {}, stale.sections, {}, frozenset({"S"}), stale.empty_since)
+    assert kinds(reconcile([], snap, today=TODAY)) == ["SetDescription"]
+
+
+def test_deleting_an_org_project_takes_its_section():
+    since = TODAY - timedelta(days=GRACE_DAYS)
+    snap = Snapshot(
+        root=ROOT,
+        orgs={"8": ProjectInfo("P", "gsainfoteam")},
+        sections={("P", "2"): SectionInfo("S2", "ziggle", "P")},
+        tasks={},
+        empty_since={"P": since, "S2": since},
+    )
+    ops = reconcile([], snap, today=TODAY)
+    assert kinds(ops) == ["Delete"]
+    assert ops[0].id == "P"

@@ -53,6 +53,9 @@ class Client:
     def post(self, path: str, **body: Any) -> Any:
         return self._request("POST", path, json=body)
 
+    def delete(self, path: str) -> Any:
+        return self._request("DELETE", path)
+
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         response = self._http.request(method, path, **kwargs)
         response.raise_for_status()

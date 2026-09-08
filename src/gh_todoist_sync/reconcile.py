@@ -10,12 +10,26 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 
-from .models import Item, SectionInfo, Snapshot
+from .models import (
+    MARKER_EMPTY,
+    MARKER_ORG,
+    MARKER_REPO,
+    Item,
+    ProjectInfo,
+    SectionInfo,
+    Snapshot,
+)
 
 # A run that wants to complete more than this is almost certainly reacting to a
 # degraded GitHub response (revoked org access, a truncated page) rather than to
 # me actually having finished that much work.
 COMPLETE_CAP = 20
+
+# A section or sub-project that has gone empty is usually about to be refilled:
+# the last issue in a repo closes today, the next one opens tomorrow. So an empty
+# container is stamped with the date rather than deleted, and only goes once it
+# has stayed empty this many days.
+GRACE_DAYS = 7
 
 
 class SyncError(Exception):
@@ -115,6 +129,22 @@ class CompleteTask:
     content: str
 
 
+@dataclass(frozen=True, slots=True)
+class SetDescription:
+    """Stamps or clears the empty marker. `kind` is the REST collection."""
+
+    id: str
+    kind: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class Delete:
+    id: str
+    kind: str
+    name: str
+
+
 type Op = (
     CreateRoot
     | CreateOrgProject
@@ -125,6 +155,8 @@ type Op = (
     | UpdateTask
     | MoveTask
     | CompleteTask
+    | SetDescription
+    | Delete
 )
 
 
@@ -218,11 +250,54 @@ def _completion_ops(items: list[Item], snap: Snapshot, cap: int) -> list[Op]:
     return [CompleteTask(t.id, t.content) for t in stale]
 
 
-def reconcile(items: list[Item], snap: Snapshot, cap: int = COMPLETE_CAP) -> list[Op]:
+def _cleanup_ops(
+    items: list[Item], snap: Snapshot, refs: _Refs, today: date, grace: int
+) -> list[Op]:
+    """Stamp empty containers, delete the ones that stayed empty past the grace.
+
+    A task completed by this same run still counts as occupying its section --
+    the snapshot was taken before it closed -- so the clock starts one poll late.
+    """
+    live = set(snap.occupied)
+    for item in items:
+        live.update(
+            ref.id for ref in (refs.project(item), refs.section(item)) if isinstance(ref, Existing)
+        )
+
+    ops: list[Op] = []
+    gone: set[str] = set()
+
+    def decide(kind: str, info: ProjectInfo | SectionInfo, marker: str) -> None:
+        since = snap.empty_since.get(info.id)
+        if info.id in live:
+            if since is not None:
+                ops.append(SetDescription(info.id, kind, marker))
+        elif since is None:
+            ops.append(SetDescription(info.id, kind, f"{marker}\n{MARKER_EMPTY}{today}"))
+        elif (today - since).days >= grace:
+            ops.append(Delete(info.id, kind, info.name))
+            gone.add(info.id)
+
+    for owner_id, project in sorted(snap.orgs.items()):
+        decide("projects", project, f"{MARKER_ORG}{owner_id}")
+    for (_, repo_id), section in sorted(snap.sections.items()):
+        if section.project_id not in gone:  # deleting the project takes it anyway
+            decide("sections", section, f"{MARKER_REPO}{repo_id}")
+    return ops
+
+
+def reconcile(
+    items: list[Item],
+    snap: Snapshot,
+    cap: int = COMPLETE_CAP,
+    grace: int = GRACE_DAYS,
+    today: date | None = None,
+) -> list[Op]:
     refs = _Refs(snap)
     ops: list[Op] = [] if snap.root else [CreateRoot()]
     ops += _org_ops(items, snap)
     ops += _section_ops(items, refs)
     ops += _task_ops(items, snap, refs)
     ops += _completion_ops(items, snap, cap)
+    ops += _cleanup_ops(items, snap, refs, today or date.today(), grace)
     return ops

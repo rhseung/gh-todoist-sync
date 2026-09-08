@@ -7,7 +7,7 @@ from typing import Annotated
 import typer
 
 from . import agent, gh, todoist
-from .reconcile import COMPLETE_CAP, SyncError, reconcile
+from .reconcile import COMPLETE_CAP, GRACE_DAYS, SyncError, reconcile
 
 app = typer.Typer(help="Mirror GitHub work assigned to me into Todoist.")
 
@@ -24,6 +24,9 @@ def sync(
         bool, typer.Option("--dry-run", help="Print the plan, change nothing.")
     ] = False,
     force: Annotated[bool, typer.Option("--force", help="Lift the bulk-completion guard.")] = False,
+    grace: Annotated[
+        int, typer.Option(help="Days a section or sub-project may sit empty before deletion.")
+    ] = GRACE_DAYS,
 ) -> None:
     """Bring Todoist in line with GitHub."""
     # GitHub is read first and on its own: if it fails, nothing is written, so a
@@ -34,7 +37,7 @@ def sync(
     with todoist.client() as api:
         try:
             cap = 10**9 if force else COMPLETE_CAP
-            ops = reconcile(items, todoist.snapshot(api), cap=cap)
+            ops = reconcile(items, todoist.snapshot(api), cap=cap, grace=grace)
         except SyncError as error:
             typer.secho(str(error), fg=typer.colors.RED, err=True)
             raise typer.Exit(1) from error

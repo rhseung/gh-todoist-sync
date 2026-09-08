@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any
 
 from .models import (
+    MARKER_EMPTY,
     MARKER_ORG,
     MARKER_REPO,
     MARKER_ROOT,
@@ -23,6 +24,7 @@ from .reconcile import (
     CreateRoot,
     CreateSection,
     CreateTask,
+    Delete,
     Existing,
     MoveTask,
     NewOrg,
@@ -33,6 +35,7 @@ from .reconcile import (
     RenameProject,
     RenameSection,
     SectionRef,
+    SetDescription,
     UpdateTask,
 )
 from .rest import Client, cli_token
@@ -72,13 +75,22 @@ def snapshot(api: Client) -> Snapshot:
     tree = [root] + [p for p in projects if p.get("parent_id") == root["id"]]
     sections: dict[tuple[str, str], SectionInfo] = {}
     tasks: dict[str, TaskInfo] = {}
+    occupied: set[str] = set()
+    empty_since: dict[str, date] = {}
     for project in tree:
+        if when := marker_value(project.get("description"), MARKER_EMPTY):
+            empty_since[project["id"]] = date.fromisoformat(when)
         for raw in _all(api, "/sections", project_id=project["id"]):
             if repo_id := marker_value(raw.get("description"), MARKER_REPO):
                 sections[(raw["project_id"], repo_id)] = SectionInfo(
                     raw["id"], raw["name"], raw["project_id"]
                 )
+                if when := marker_value(raw.get("description"), MARKER_EMPTY):
+                    empty_since[raw["id"]] = date.fromisoformat(when)
         for raw in _all(api, "/tasks", project_id=project["id"]):
+            occupied.add(raw["project_id"])
+            if raw.get("section_id"):
+                occupied.add(raw["section_id"])
             if gh_id := marker_value(raw.get("description"), MARKER_TASK):
                 tasks[gh_id] = TaskInfo(
                     id=raw["id"],
@@ -97,6 +109,8 @@ def snapshot(api: Client) -> Snapshot:
         },
         sections=sections,
         tasks=tasks,
+        occupied=frozenset(occupied),
+        empty_since=empty_since,
     )
 
 
@@ -181,6 +195,10 @@ class Applier:
                 )
             case CompleteTask(id=task_id):
                 api.post(f"/tasks/{task_id}/close")
+            case SetDescription(id=object_id, kind=kind, description=description):
+                api.post(f"/{kind}/{object_id}", description=description)
+            case Delete(id=object_id, kind=kind):
+                api.delete(f"/{kind}/{object_id}")
 
 
 def apply(api: Client, ops: list[Op]) -> None:
