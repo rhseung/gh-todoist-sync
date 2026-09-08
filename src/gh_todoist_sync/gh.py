@@ -51,6 +51,9 @@ def _pages(api: Client, path: str, **params: Any):
 def desired(api: Client) -> list[Item]:
     """Assigned issues and PRs, plus PRs awaiting my review or opened by me.
 
+    Archived repos are dropped: their work cannot be acted on, so a task for it
+    is noise. The repo stays cached either way, so the skip costs no extra call.
+
     The assigned list comes from the REST issues endpoint rather than search: it
     has no search-index lag, and it embeds the repository and owner ids that the
     whole id-based mapping depends on. Search returns neither, so the few PRs it
@@ -62,6 +65,8 @@ def desired(api: Client) -> list[Item]:
     for issue in _pages(api, "/issues", filter="assigned", state="open"):
         repo = issue["repository"]
         repos[repo["full_name"]] = repo
+        if repo["archived"]:
+            continue
         items[issue["node_id"]] = _item(issue, repo, is_pr="pull_request" in issue)
 
     for qualifier in ("review-requested:@me", "author:@me"):
@@ -70,6 +75,8 @@ def desired(api: Client) -> list[Item]:
             full_name = pr["repository_url"].removeprefix(f"{BASE_URL}/repos/")
             if full_name not in repos:
                 repos[full_name] = api.get(f"/repos/{full_name}")
+            if repos[full_name]["archived"]:
+                continue
             # Assigned to me and also mine: PR wins, it carries the higher priority.
             items[pr["node_id"]] = _item(pr, repos[full_name], is_pr=True)
 
