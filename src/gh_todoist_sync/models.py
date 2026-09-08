@@ -10,16 +10,6 @@ from datetime import date
 
 ROOT_NAME = "GitHub"
 
-# The GitHub -> Todoist mapping lives in Todoist's own description fields rather
-# than a local state file, so it survives a new machine and manual UI edits.
-MARKER_ROOT = "gh-root: 1"
-MARKER_ORG = "gh-org-id: "
-MARKER_REPO = "gh-repo-id: "
-MARKER_TASK = "gh-id: "
-# Stamped on a section or sub-project the moment it is first seen empty, so the
-# grace period survives between runs without a local state file.
-MARKER_EMPTY = "gh-empty-since: "
-
 # Todoist's API priority runs backwards from the p1..p4 labels in the UI.
 PRIORITY_ISSUE = 1  # p4
 PRIORITY_PR = 3  # p2
@@ -54,10 +44,6 @@ class Item:
         # left out because the section already names it.
         return f"[#{self.number}]({self.url}) {self.title}"
 
-    @property
-    def description(self) -> str:
-        return f"{MARKER_TASK}{self.gh_id}\n{self.url}"
-
     # Written as an explicit markdown link, not a bare URL: Todoist rewrites a
     # bare URL into a titled link of its own, which would read as a change on
     # every single poll and rewrite the description forever.
@@ -69,16 +55,13 @@ class Item:
     def repo_url(self) -> str:
         return f"{self.owner_url}/{self.repo_name}"
 
-    # A blank line has to follow the link, or markdown pulls the marker up onto
-    # the link's own line.
-
     @property
     def project_description(self) -> str:
-        return f"[{self.owner_login}]({self.owner_url})\n\n{MARKER_ORG}{self.owner_id}"
+        return f"[{self.owner_login}]({self.owner_url})"
 
     @property
     def section_description(self) -> str:
-        return f"[{self.repo_name}]({self.repo_url})\n\n{MARKER_REPO}{self.repo_id}"
+        return f"[{self.repo_name}]({self.repo_url})"
 
     @property
     def priority(self) -> int:
@@ -127,28 +110,14 @@ class LabelInfo:
 
 @dataclass(frozen=True, slots=True)
 class Snapshot:
-    """Todoist's current state, pre-indexed by the GitHub ids embedded in it."""
+    """Todoist's current state, indexed by GitHub id through the state file."""
 
     root: ProjectInfo | None
     orgs: dict[str, ProjectInfo]  # owner_id -> sub-project
     sections: dict[tuple[str, str], SectionInfo]  # (project_id, repo_id) -> section
     tasks: dict[str, TaskInfo]  # gh_id -> task
-    # Every task counts here, marked or not: deleting a container takes whatever
+    # Every task counts here, ours or not: deleting a container takes whatever
     # is inside it, so a hand written note is enough to keep one alive.
     occupied: frozenset[str] = frozenset()  # project and section ids holding a task
     empty_since: dict[str, date] = field(default_factory=dict)  # id -> first seen empty
     labels: dict[str, LabelInfo] = field(default_factory=dict)  # label name -> label
-
-
-def without_marker(description: str, prefix: str) -> str:
-    """The description as it reads with one marker line taken back out."""
-    kept = [line for line in description.splitlines() if not line.strip().startswith(prefix)]
-    return "\n".join(kept)
-
-
-def marker_value(description: str | None, prefix: str) -> str | None:
-    for line in (description or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith(prefix):
-            return stripped[len(prefix) :].strip()
-    return None

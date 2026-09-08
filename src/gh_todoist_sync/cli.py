@@ -6,7 +6,7 @@ from typing import Annotated
 
 import typer
 
-from . import agent, gh, todoist
+from . import agent, gh, state, todoist
 from .reconcile import COMPLETE_CAP, GRACE_DAYS, SyncError, reconcile
 
 app = typer.Typer(help="Mirror GitHub work assigned to me into Todoist.")
@@ -34,10 +34,11 @@ def sync(
     with gh.client() as api:
         items = gh.desired(api)
 
+    current = state.load()
     with todoist.client() as api:
         try:
             cap = 10**9 if force else COMPLETE_CAP
-            ops = reconcile(items, todoist.snapshot(api), cap=cap, grace=grace)
+            ops = reconcile(items, todoist.snapshot(api, current), cap=cap, grace=grace)
         except SyncError as error:
             typer.secho(str(error), fg=typer.colors.RED, err=True)
             raise typer.Exit(1) from error
@@ -45,7 +46,7 @@ def sync(
             for op in ops:
                 typer.echo(f"{type(op).__name__:18} {op}")
         else:
-            todoist.apply(api, ops)
+            todoist.apply(api, current, ops)
 
     typer.echo(f"{len(items)} github items, {len(ops)} ops{' (dry run)' if dry_run else ''}")
 

@@ -10,15 +10,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 
-from .models import (
-    LABEL_COLORS,
-    MARKER_EMPTY,
-    Item,
-    ProjectInfo,
-    SectionInfo,
-    Snapshot,
-    without_marker,
-)
+from .models import LABEL_COLORS, Item, ProjectInfo, SectionInfo, Snapshot
 
 # A run that wants to complete more than this is almost certainly reacting to a
 # degraded GitHub response (revoked org access, a truncated page) rather than to
@@ -102,8 +94,8 @@ class RenameSection:
 
 @dataclass(frozen=True, slots=True)
 class CreateTask:
+    gh_id: str
     content: str
-    description: str
     priority: int
     deadline: date | None
     labels: tuple[str, ...]
@@ -130,6 +122,7 @@ class MoveTask:
 @dataclass(frozen=True, slots=True)
 class CompleteTask:
     id: str
+    gh_id: str
     content: str
 
 
@@ -147,6 +140,14 @@ class Delete:
     id: str
     kind: str
     name: str
+
+
+@dataclass(frozen=True, slots=True)
+class MarkEmpty:
+    """Bookkeeping only -- the grace clock lives in the state file, not Todoist."""
+
+    id: str
+    since: date | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +171,7 @@ type Op = (
     | CompleteTask
     | SetDescription
     | Delete
+    | MarkEmpty
     | SetLabel
 )
 
@@ -235,8 +237,8 @@ def _task_ops(items: list[Item], snap: Snapshot, refs: _Refs) -> Iterator[Op]:
         task = snap.tasks.get(item.gh_id)
         if task is None:
             yield CreateTask(
+                item.gh_id,
                 item.content,
-                item.description,
                 item.priority,
                 item.deadline,
                 item.labels(),
@@ -260,13 +262,13 @@ def _task_ops(items: list[Item], snap: Snapshot, refs: _Refs) -> Iterator[Op]:
 def _completion_ops(items: list[Item], snap: Snapshot, cap: int) -> list[Op]:
     """Anything GitHub no longer hands me."""
     goal = {i.gh_id for i in items}
-    stale = [t for gh_id, t in sorted(snap.tasks.items()) if gh_id not in goal]
+    stale = [(gh_id, t) for gh_id, t in sorted(snap.tasks.items()) if gh_id not in goal]
     if len(stale) > cap:
         raise SyncError(
             f"{len(stale)} tasks would be completed (cap {cap}). That usually means a "
             f"degraded GitHub response, not finished work. Re-run with --force if intended."
         )
-    return [CompleteTask(t.id, t.content) for t in stale]
+    return [CompleteTask(t.id, gh_id, t.content) for gh_id, t in stale]
 
 
 def _label_ops(snap: Snapshot) -> Iterator[Op]:
@@ -280,10 +282,7 @@ def _label_ops(snap: Snapshot) -> Iterator[Op]:
 def _cleanup_ops(
     items: list[Item], snap: Snapshot, refs: _Refs, today: date, grace: int
 ) -> list[Op]:
-    """Owns every description under the tree, and deletes what stays empty.
-
-    Descriptions are rewritten here rather than beside the rename ops so that
-    the GitHub link and the empty stamp can never fight over the same field.
+    """Keep every description current, and delete what stays empty past the grace.
 
     A task completed by this same run still counts as occupying its section --
     the snapshot was taken before it closed -- so the clock starts one poll late.
@@ -305,15 +304,17 @@ def _cleanup_ops(
 
     def decide(kind: str, info: ProjectInfo | SectionInfo) -> None:
         since = snap.empty_since.get(info.id)
-        if info.id not in live and since is not None and (today - since).days >= grace:
+        if info.id in live:
+            if since is not None:
+                ops.append(MarkEmpty(info.id, None))
+        elif since is None:
+            ops.append(MarkEmpty(info.id, today))
+        elif (today - since).days >= grace:
             ops.append(Delete(info.id, kind, info.name))
             gone.add(info.id)
             return
         # A stale container has no item to rebuild from, so its own text stands.
-        base = wanted.get(info.id) or without_marker(info.description, MARKER_EMPTY)
-        stamp = since or today
-        want = base if info.id in live else f"{base}\n{MARKER_EMPTY}{stamp}"
-        if want != info.description:
+        if (want := wanted.get(info.id)) and want != info.description:
             ops.append(SetDescription(info.id, kind, want))
 
     for project in sorted(snap.orgs.values(), key=lambda p: p.id):

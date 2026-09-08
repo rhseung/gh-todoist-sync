@@ -9,7 +9,6 @@ import pytest
 from gh_todoist_sync.models import (
     LABEL_ISSUE,
     LABEL_PR,
-    MARKER_TASK,
     PRIORITY_ISSUE,
     PRIORITY_PR,
     Item,
@@ -18,11 +17,11 @@ from gh_todoist_sync.models import (
     SectionInfo,
     Snapshot,
     TaskInfo,
-    marker_value,
 )
 from gh_todoist_sync.reconcile import (
     GRACE_DAYS,
     CreateTask,
+    MarkEmpty,
     SetLabel,
     SyncError,
     reconcile,
@@ -95,7 +94,7 @@ def test_repo_rename_touches_only_the_section():
     # only the section's own name and the repo link in its description.
     ops = reconcile([item(repo_name="rds2")], settled(one), today=TODAY)
     assert kinds(ops) == ["RenameSection", "SetDescription"]
-    assert ops[1].description == "[rds2](https://github.com/rhseung/rds2)\n\ngh-repo-id: 1"
+    assert ops[1].description == "[rds2](https://github.com/rhseung/rds2)"
 
 
 def test_issue_retitle_rewrites_the_task():
@@ -143,13 +142,6 @@ def test_bulk_completion_is_refused():
     assert len(reconcile([], snap, cap=99)) == 21
 
 
-def test_unmarked_tasks_are_invisible():
-    # Anything without a gh-id marker never reaches the snapshot, so a hand
-    # written note living in the GitHub project is never touched.
-    assert marker_value("just a note", MARKER_TASK) is None
-    assert marker_value(f"{MARKER_TASK}I_a\nhttps://gh/1", MARKER_TASK) == "I_a"
-
-
 def test_task_in_the_wrong_section_is_moved():
     one = item()
     snap = settled(one)
@@ -161,13 +153,12 @@ def test_task_in_the_wrong_section_is_moved():
 
 def empty_section(empty_since: date | None) -> Snapshot:
     """A section Todoist still has but GitHub has nothing for."""
-    description = "[rds](https://github.com/rhseung/rds)\n\ngh-repo-id: 1"
-    if empty_since:
-        description += f"\ngh-empty-since: {empty_since}"
     return Snapshot(
         root=ROOT,
         orgs={},
-        sections={("R", "1"): SectionInfo("S", "rds", "R", description)},
+        sections={
+            ("R", "1"): SectionInfo("S", "rds", "R", "[rds](https://github.com/rhseung/rds)")
+        },
         tasks={},
         occupied=frozenset(),
         empty_since={"S": empty_since} if empty_since else {},
@@ -177,8 +168,7 @@ def empty_section(empty_since: date | None) -> Snapshot:
 
 def test_newly_empty_section_is_stamped_not_deleted():
     ops = reconcile([], empty_section(None), today=TODAY)
-    assert kinds(ops) == ["SetDescription"]
-    assert ops[0].description.splitlines()[-1] == "gh-empty-since: 2026-09-08"
+    assert ops == [MarkEmpty("S", TODAY)]
 
 
 def test_section_inside_the_grace_period_is_left_alone():
@@ -196,8 +186,8 @@ def test_section_empty_past_the_grace_period_is_deleted():
 def test_refilled_section_loses_its_stamp():
     snap = empty_section(TODAY - timedelta(days=99))
     ops = reconcile([item()], snap, today=TODAY)
-    assert kinds(ops) == ["CreateTask", "SetDescription"]
-    assert ops[1].description == "[rds](https://github.com/rhseung/rds)\n\ngh-repo-id: 1"
+    assert kinds(ops) == ["CreateTask", "MarkEmpty"]
+    assert ops[1] == MarkEmpty("S", None)
 
 
 def test_an_unmarked_task_keeps_the_section_alive():
@@ -207,16 +197,15 @@ def test_an_unmarked_task_keeps_the_section_alive():
     snap = Snapshot(
         stale.root, {}, stale.sections, {}, frozenset({"S"}), stale.empty_since, PAINTED
     )
-    assert kinds(reconcile([], snap, today=TODAY)) == ["SetDescription"]
+    assert reconcile([], snap, today=TODAY) == [MarkEmpty("S", None)]
 
 
 def test_deleting_an_org_project_takes_its_section():
     since = TODAY - timedelta(days=GRACE_DAYS)
-    stamp = f"\ngh-empty-since: {since}"
     snap = Snapshot(
         root=ROOT,
-        orgs={"8": ProjectInfo("P", "gsainfoteam", f"gh-org-id: 8{stamp}")},
-        sections={("P", "2"): SectionInfo("S2", "ziggle", "P", f"gh-repo-id: 2{stamp}")},
+        orgs={"8": ProjectInfo("P", "gsainfoteam")},
+        sections={("P", "2"): SectionInfo("S2", "ziggle", "P")},
         tasks={},
         empty_since={"P": since, "S2": since},
         labels=PAINTED,
@@ -232,8 +221,8 @@ def test_descriptions_lead_with_a_link_to_github():
     assert kinds(ops) == ["CreateOrgProject", "CreateSection", "CreateTask"]
     # Explicit markdown link, not a bare URL -- Todoist retitles a bare URL and
     # the description would then differ from what reconcile wants on every poll.
-    assert ops[0].description == "[gsainfoteam](https://github.com/gsainfoteam)\n\ngh-org-id: 8"
-    assert ops[1].description == "[rds](https://github.com/gsainfoteam/rds)\n\ngh-repo-id: 1"
+    assert ops[0].description == "[gsainfoteam](https://github.com/gsainfoteam)"
+    assert ops[1].description == "[rds](https://github.com/gsainfoteam/rds)"
 
 
 def test_org_rename_rewrites_the_project_link():
@@ -252,7 +241,7 @@ def test_org_rename_rewrites_the_project_link():
     )
     ops = reconcile([org], snap, today=TODAY)
     assert kinds(ops) == ["RenameProject", "CreateSection", "CreateTask", "SetDescription"]
-    assert ops[3].description == "[gsa-new](https://github.com/gsa-new)\n\ngh-org-id: 8"
+    assert ops[3].description == "[gsa-new](https://github.com/gsa-new)"
 
 
 def test_labels_are_painted_so_the_two_kinds_read_apart():
