@@ -52,6 +52,24 @@ class Item:
         return f"{MARKER_TASK}{self.gh_id}\n{self.url}"
 
     @property
+    def owner_url(self) -> str:
+        return f"https://github.com/{self.owner_login}"
+
+    @property
+    def repo_url(self) -> str:
+        return f"{self.owner_url}/{self.repo_name}"
+
+    @property
+    def project_description(self) -> str:
+        return f"{self.owner_url}\n\n{MARKER_ORG}{self.owner_id}"
+
+    @property
+    def section_description(self) -> str:
+        # Blank line first: Todoist renders the description as markdown, so
+        # without it the marker gets pulled up onto the link's line.
+        return f"{self.repo_url}\n\n{MARKER_REPO}{self.repo_id}"
+
+    @property
     def priority(self) -> int:
         return PRIORITY_PR if self.is_pr else PRIORITY_ISSUE
 
@@ -60,6 +78,7 @@ class Item:
 class ProjectInfo:
     id: str
     name: str
+    description: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +86,7 @@ class SectionInfo:
     id: str
     name: str
     project_id: str
+    description: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +111,12 @@ class Snapshot:
     # is inside it, so a hand written note is enough to keep one alive.
     occupied: frozenset[str] = frozenset()  # project and section ids holding a task
     empty_since: dict[str, date] = field(default_factory=dict)  # id -> first seen empty
+
+
+def without_marker(description: str, prefix: str) -> str:
+    """The description as it reads with one marker line taken back out."""
+    kept = [line for line in description.splitlines() if not line.strip().startswith(prefix)]
+    return "\n".join(kept)
 
 
 def marker_value(description: str | None, prefix: str) -> str | None:

@@ -83,7 +83,7 @@ def snapshot(api: Client) -> Snapshot:
         for raw in _all(api, "/sections", project_id=project["id"]):
             if repo_id := marker_value(raw.get("description"), MARKER_REPO):
                 sections[(raw["project_id"], repo_id)] = SectionInfo(
-                    raw["id"], raw["name"], raw["project_id"]
+                    raw["id"], raw["name"], raw["project_id"], raw.get("description") or ""
                 )
                 if when := marker_value(raw.get("description"), MARKER_EMPTY):
                     empty_since[raw["id"]] = date.fromisoformat(when)
@@ -103,7 +103,7 @@ def snapshot(api: Client) -> Snapshot:
     return Snapshot(
         root=ProjectInfo(root["id"], root["name"]),
         orgs={
-            owner_id: ProjectInfo(p["id"], p["name"])
+            owner_id: ProjectInfo(p["id"], p["name"], p.get("description") or "")
             for p in tree[1:]
             if (owner_id := marker_value(p.get("description"), MARKER_ORG))
         },
@@ -145,21 +145,23 @@ class Applier:
         match op:
             case CreateRoot():
                 self._root = api.post("/projects", name=ROOT_NAME, description=MARKER_ROOT)["id"]
-            case CreateOrgProject(owner_id=owner_id, name=name):
+            case CreateOrgProject(owner_id=owner_id, name=name, description=description):
                 self._orgs[owner_id] = api.post(
                     "/projects",
                     name=name,
                     parent_id=self.project(NewRoot()),
-                    description=f"{MARKER_ORG}{owner_id}",
+                    description=description,
                 )["id"]
             case RenameProject(id=project_id, name=name):
                 api.post(f"/projects/{project_id}", name=name)
-            case CreateSection(repo_id=repo_id, name=name, project=project):
+            case CreateSection(
+                repo_id=repo_id, name=name, description=description, project=project
+            ):
                 self._sections[repo_id] = api.post(
                     "/sections",
                     name=name,
                     project_id=self.project(project),
-                    description=f"{MARKER_REPO}{repo_id}",
+                    description=description,
                 )["id"]
             case RenameSection(id=section_id, name=name):
                 api.post(f"/sections/{section_id}", name=name)

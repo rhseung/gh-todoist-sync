@@ -12,12 +12,11 @@ from datetime import date
 
 from .models import (
     MARKER_EMPTY,
-    MARKER_ORG,
-    MARKER_REPO,
     Item,
     ProjectInfo,
     SectionInfo,
     Snapshot,
+    without_marker,
 )
 
 # A run that wants to complete more than this is almost certainly reacting to a
@@ -77,6 +76,7 @@ class CreateRoot:
 class CreateOrgProject:
     owner_id: str
     name: str
+    description: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +89,7 @@ class RenameProject:
 class CreateSection:
     repo_id: str
     name: str
+    description: str
     project: ProjectRef
 
 
@@ -191,13 +192,13 @@ class _Refs:
 
 def _org_ops(items: list[Item], snap: Snapshot) -> Iterator[Op]:
     """One sub-project per organization, named after the org as GitHub has it."""
-    orgs = {i.owner_id: i.owner_login for i in items if i.owner_is_org}
-    for owner_id, login in sorted(orgs.items()):
+    orgs = {i.owner_id: i for i in items if i.owner_is_org}
+    for owner_id, one in sorted(orgs.items()):
         have = snap.orgs.get(owner_id)
         if have is None:
-            yield CreateOrgProject(owner_id, login)
-        elif have.name != login:
-            yield RenameProject(have.id, login)
+            yield CreateOrgProject(owner_id, one.owner_login, one.project_description)
+        elif have.name != one.owner_login:
+            yield RenameProject(have.id, one.owner_login)
 
 
 def _section_ops(items: list[Item], refs: _Refs) -> Iterator[Op]:
@@ -209,7 +210,9 @@ def _section_ops(items: list[Item], refs: _Refs) -> Iterator[Op]:
         seen.add(item.repo_id)
         have = refs.existing_section(item)
         if have is None:
-            yield CreateSection(item.repo_id, item.repo_name, refs.project(item))
+            yield CreateSection(
+                item.repo_id, item.repo_name, item.section_description, refs.project(item)
+            )
         elif have.name != item.repo_name:
             yield RenameSection(have.id, item.repo_name)
 
@@ -253,36 +256,47 @@ def _completion_ops(items: list[Item], snap: Snapshot, cap: int) -> list[Op]:
 def _cleanup_ops(
     items: list[Item], snap: Snapshot, refs: _Refs, today: date, grace: int
 ) -> list[Op]:
-    """Stamp empty containers, delete the ones that stayed empty past the grace.
+    """Owns every description under the tree, and deletes what stays empty.
+
+    Descriptions are rewritten here rather than beside the rename ops so that
+    the GitHub link and the empty stamp can never fight over the same field.
 
     A task completed by this same run still counts as occupying its section --
     the snapshot was taken before it closed -- so the clock starts one poll late.
     """
     live = set(snap.occupied)
+    wanted: dict[str, str] = {}
     for item in items:
-        live.update(
-            ref.id for ref in (refs.project(item), refs.section(item)) if isinstance(ref, Existing)
-        )
+        project = refs.project(item)
+        if isinstance(project, Existing):
+            live.add(project.id)
+            if item.owner_is_org:
+                wanted[project.id] = item.project_description
+        if section := refs.existing_section(item):
+            live.add(section.id)
+            wanted[section.id] = item.section_description
 
     ops: list[Op] = []
     gone: set[str] = set()
 
-    def decide(kind: str, info: ProjectInfo | SectionInfo, marker: str) -> None:
+    def decide(kind: str, info: ProjectInfo | SectionInfo) -> None:
         since = snap.empty_since.get(info.id)
-        if info.id in live:
-            if since is not None:
-                ops.append(SetDescription(info.id, kind, marker))
-        elif since is None:
-            ops.append(SetDescription(info.id, kind, f"{marker}\n{MARKER_EMPTY}{today}"))
-        elif (today - since).days >= grace:
+        if info.id not in live and since is not None and (today - since).days >= grace:
             ops.append(Delete(info.id, kind, info.name))
             gone.add(info.id)
+            return
+        # A stale container has no item to rebuild from, so its own text stands.
+        base = wanted.get(info.id) or without_marker(info.description, MARKER_EMPTY)
+        stamp = since or today
+        want = base if info.id in live else f"{base}\n{MARKER_EMPTY}{stamp}"
+        if want != info.description:
+            ops.append(SetDescription(info.id, kind, want))
 
-    for owner_id, project in sorted(snap.orgs.items()):
-        decide("projects", project, f"{MARKER_ORG}{owner_id}")
-    for (_, repo_id), section in sorted(snap.sections.items()):
+    for project in sorted(snap.orgs.values(), key=lambda p: p.id):
+        decide("projects", project)
+    for section in sorted(snap.sections.values(), key=lambda s: s.id):
         if section.project_id not in gone:  # deleting the project takes it anyway
-            decide("sections", section, f"{MARKER_REPO}{repo_id}")
+            decide("sections", section)
     return ops
 
 
