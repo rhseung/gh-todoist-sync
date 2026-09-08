@@ -24,6 +24,13 @@ MARKER_EMPTY = "gh-empty-since: "
 PRIORITY_ISSUE = 1  # p4
 PRIORITY_PR = 3  # p2
 
+# Priority says how urgent, not what kind, so the kind is a label -- which is
+# also what `@gh-pr` in a Todoist filter can select on. The colours are the ones
+# GitHub itself uses for the two icons, so the sidebar reads at a glance.
+LABEL_PR = "gh-pr"
+LABEL_ISSUE = "gh-issue"
+LABEL_COLORS = {LABEL_PR: "grape", LABEL_ISSUE: "green"}
+
 
 @dataclass(frozen=True, slots=True)
 class Item:
@@ -51,6 +58,9 @@ class Item:
     def description(self) -> str:
         return f"{MARKER_TASK}{self.gh_id}\n{self.url}"
 
+    # Written as an explicit markdown link, not a bare URL: Todoist rewrites a
+    # bare URL into a titled link of its own, which would read as a change on
+    # every single poll and rewrite the description forever.
     @property
     def owner_url(self) -> str:
         return f"https://github.com/{self.owner_login}"
@@ -59,19 +69,28 @@ class Item:
     def repo_url(self) -> str:
         return f"{self.owner_url}/{self.repo_name}"
 
+    # A blank line has to follow the link, or markdown pulls the marker up onto
+    # the link's own line.
+
     @property
     def project_description(self) -> str:
-        return f"{self.owner_url}\n\n{MARKER_ORG}{self.owner_id}"
+        return f"[{self.owner_login}]({self.owner_url})\n\n{MARKER_ORG}{self.owner_id}"
 
     @property
     def section_description(self) -> str:
-        # Blank line first: Todoist renders the description as markdown, so
-        # without it the marker gets pulled up onto the link's line.
-        return f"{self.repo_url}\n\n{MARKER_REPO}{self.repo_id}"
+        return f"[{self.repo_name}]({self.repo_url})\n\n{MARKER_REPO}{self.repo_id}"
 
     @property
     def priority(self) -> int:
         return PRIORITY_PR if self.is_pr else PRIORITY_ISSUE
+
+    @property
+    def label(self) -> str:
+        return LABEL_PR if self.is_pr else LABEL_ISSUE
+
+    def labels(self, current: tuple[str, ...] = ()) -> tuple[str, ...]:
+        """This item's kind, on top of whatever labels were added by hand."""
+        return (*(x for x in current if x not in LABEL_COLORS), self.label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +116,13 @@ class TaskInfo:
     section_id: str | None
     priority: int
     deadline: date | None
+    labels: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class LabelInfo:
+    id: str
+    color: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +137,7 @@ class Snapshot:
     # is inside it, so a hand written note is enough to keep one alive.
     occupied: frozenset[str] = frozenset()  # project and section ids holding a task
     empty_since: dict[str, date] = field(default_factory=dict)  # id -> first seen empty
+    labels: dict[str, LabelInfo] = field(default_factory=dict)  # label name -> label
 
 
 def without_marker(description: str, prefix: str) -> str:

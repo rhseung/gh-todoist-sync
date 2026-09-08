@@ -7,10 +7,13 @@ from datetime import date, timedelta
 import pytest
 
 from gh_todoist_sync.models import (
+    LABEL_ISSUE,
+    LABEL_PR,
     MARKER_TASK,
     PRIORITY_ISSUE,
     PRIORITY_PR,
     Item,
+    LabelInfo,
     ProjectInfo,
     SectionInfo,
     Snapshot,
@@ -19,12 +22,16 @@ from gh_todoist_sync.models import (
 )
 from gh_todoist_sync.reconcile import (
     GRACE_DAYS,
+    CreateTask,
+    SetLabel,
     SyncError,
     reconcile,
 )
 
 ROOT = ProjectInfo("R", "GitHub")
 TODAY = date(2026, 9, 8)
+# Painted already, so _label_ops stays quiet and the other tests read clean.
+PAINTED = {LABEL_PR: LabelInfo("LP", "grape"), LABEL_ISSUE: LabelInfo("LI", "green")}
 
 
 def item(**overrides) -> Item:
@@ -52,8 +59,13 @@ def settled(one: Item) -> Snapshot:
         sections={
             ("R", one.repo_id): SectionInfo("S", one.repo_name, "R", one.section_description)
         },
-        tasks={one.gh_id: TaskInfo("T", one.content, "R", "S", one.priority, one.deadline)},
+        tasks={
+            one.gh_id: TaskInfo(
+                "T", one.content, "R", "S", one.priority, one.deadline, one.labels()
+            )
+        },
         occupied=frozenset({"R", "S"}),
+        labels=PAINTED,
     )
 
 
@@ -67,7 +79,7 @@ def test_steady_state_is_a_no_op():
 
 
 def test_empty_todoist_builds_the_tree():
-    ops = reconcile([item()], Snapshot(None, {}, {}, {}))
+    ops = reconcile([item()], Snapshot(None, {}, {}, {}, labels=PAINTED))
     assert kinds(ops) == ["CreateRoot", "CreateSection", "CreateTask"]
 
 
@@ -83,7 +95,7 @@ def test_repo_rename_touches_only_the_section():
     # only the section's own name and the repo link in its description.
     ops = reconcile([item(repo_name="rds2")], settled(one), today=TODAY)
     assert kinds(ops) == ["RenameSection", "SetDescription"]
-    assert ops[1].description == "https://github.com/rhseung/rds2\n\ngh-repo-id: 1"
+    assert ops[1].description == "[rds2](https://github.com/rhseung/rds2)\n\ngh-repo-id: 1"
 
 
 def test_issue_retitle_rewrites_the_task():
@@ -104,7 +116,7 @@ def test_org_repo_gets_a_sub_project():
         is_pr=True,
         deadline=date(2026, 10, 1),
     )
-    ops = reconcile([org], Snapshot(ROOT, {}, {}, {}))
+    ops = reconcile([org], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
     assert kinds(ops) == ["CreateOrgProject", "CreateSection", "CreateTask"]
     assert ops[2].deadline == date(2026, 10, 1)
     assert ops[2].priority == PRIORITY_PR
@@ -112,7 +124,7 @@ def test_org_repo_gets_a_sub_project():
 
 def test_org_rename_follows_github():
     org = item(owner_id="8", owner_login="gsa-new", owner_is_org=True)
-    snap = Snapshot(ROOT, {"8": ProjectInfo("P", "gsainfoteam")}, {}, {})
+    snap = Snapshot(ROOT, {"8": ProjectInfo("P", "gsainfoteam")}, {}, {}, labels=PAINTED)
     assert kinds(reconcile([org], snap))[0] == "RenameProject"
 
 
@@ -125,7 +137,7 @@ def test_vanished_issue_is_completed():
 
 def test_bulk_completion_is_refused():
     tasks = {f"I_{n}": TaskInfo(f"T{n}", "c", "R", "S", PRIORITY_ISSUE, None) for n in range(21)}
-    snap = Snapshot(ROOT, {}, {}, tasks)
+    snap = Snapshot(ROOT, {}, {}, tasks, labels=PAINTED)
     with pytest.raises(SyncError, match="21 tasks"):
         reconcile([], snap)
     assert len(reconcile([], snap, cap=99)) == 21
@@ -141,13 +153,15 @@ def test_unmarked_tasks_are_invisible():
 def test_task_in_the_wrong_section_is_moved():
     one = item()
     snap = settled(one)
-    snap.tasks[one.gh_id] = TaskInfo("T", one.content, "R", "ELSEWHERE", one.priority, one.deadline)
+    snap.tasks[one.gh_id] = TaskInfo(
+        "T", one.content, "R", "ELSEWHERE", one.priority, one.deadline, one.labels()
+    )
     assert kinds(reconcile([one], snap)) == ["MoveTask"]
 
 
 def empty_section(empty_since: date | None) -> Snapshot:
     """A section Todoist still has but GitHub has nothing for."""
-    description = "https://github.com/rhseung/rds\n\ngh-repo-id: 1"
+    description = "[rds](https://github.com/rhseung/rds)\n\ngh-repo-id: 1"
     if empty_since:
         description += f"\ngh-empty-since: {empty_since}"
     return Snapshot(
@@ -157,6 +171,7 @@ def empty_section(empty_since: date | None) -> Snapshot:
         tasks={},
         occupied=frozenset(),
         empty_since={"S": empty_since} if empty_since else {},
+        labels=PAINTED,
     )
 
 
@@ -182,14 +197,16 @@ def test_refilled_section_loses_its_stamp():
     snap = empty_section(TODAY - timedelta(days=99))
     ops = reconcile([item()], snap, today=TODAY)
     assert kinds(ops) == ["CreateTask", "SetDescription"]
-    assert ops[1].description == "https://github.com/rhseung/rds\n\ngh-repo-id: 1"
+    assert ops[1].description == "[rds](https://github.com/rhseung/rds)\n\ngh-repo-id: 1"
 
 
 def test_an_unmarked_task_keeps_the_section_alive():
     # occupied counts every task, so a hand written note is never deleted with
     # the section around it.
     stale = empty_section(TODAY - timedelta(days=99))
-    snap = Snapshot(stale.root, {}, stale.sections, {}, frozenset({"S"}), stale.empty_since)
+    snap = Snapshot(
+        stale.root, {}, stale.sections, {}, frozenset({"S"}), stale.empty_since, PAINTED
+    )
     assert kinds(reconcile([], snap, today=TODAY)) == ["SetDescription"]
 
 
@@ -202,6 +219,7 @@ def test_deleting_an_org_project_takes_its_section():
         sections={("P", "2"): SectionInfo("S2", "ziggle", "P", f"gh-repo-id: 2{stamp}")},
         tasks={},
         empty_since={"P": since, "S2": since},
+        labels=PAINTED,
     )
     ops = reconcile([], snap, today=TODAY)
     assert kinds(ops) == ["Delete"]
@@ -210,22 +228,57 @@ def test_deleting_an_org_project_takes_its_section():
 
 def test_descriptions_lead_with_a_link_to_github():
     org = item(owner_id="8", owner_login="gsainfoteam", owner_is_org=True)
-    ops = reconcile([org], Snapshot(ROOT, {}, {}, {}), today=TODAY)
+    ops = reconcile([org], Snapshot(ROOT, {}, {}, {}, labels=PAINTED), today=TODAY)
     assert kinds(ops) == ["CreateOrgProject", "CreateSection", "CreateTask"]
-    # Blank line between link and marker, or Todoist's markdown joins the lines.
-    assert ops[0].description == "https://github.com/gsainfoteam\n\ngh-org-id: 8"
-    assert ops[1].description == "https://github.com/gsainfoteam/rds\n\ngh-repo-id: 1"
+    # Explicit markdown link, not a bare URL -- Todoist retitles a bare URL and
+    # the description would then differ from what reconcile wants on every poll.
+    assert ops[0].description == "[gsainfoteam](https://github.com/gsainfoteam)\n\ngh-org-id: 8"
+    assert ops[1].description == "[rds](https://github.com/gsainfoteam/rds)\n\ngh-repo-id: 1"
 
 
 def test_org_rename_rewrites_the_project_link():
     org = item(owner_id="8", owner_login="gsa-new", owner_is_org=True)
     snap = Snapshot(
         ROOT,
-        {"8": ProjectInfo("P", "gsainfoteam", "https://github.com/gsainfoteam\n\ngh-org-id: 8")},
+        {
+            "8": ProjectInfo(
+                "P", "gsainfoteam", "[gsainfoteam](https://github.com/gsainfoteam)\n\ngh-org-id: 8"
+            )
+        },
         {},
         {},
         occupied=frozenset({"P"}),
+        labels=PAINTED,
     )
     ops = reconcile([org], snap, today=TODAY)
     assert kinds(ops) == ["RenameProject", "CreateSection", "CreateTask", "SetDescription"]
-    assert ops[3].description == "https://github.com/gsa-new\n\ngh-org-id: 8"
+    assert ops[3].description == "[gsa-new](https://github.com/gsa-new)\n\ngh-org-id: 8"
+
+
+def test_labels_are_painted_so_the_two_kinds_read_apart():
+    # Todoist invents the label in grey the first time a task names it.
+    ops = reconcile([item()], Snapshot(ROOT, {}, {}, {}), today=TODAY)
+    assert [(op.name, op.color, op.id) for op in ops if isinstance(op, SetLabel)] == [
+        (LABEL_ISSUE, "green", None),
+        (LABEL_PR, "grape", None),
+    ]
+    faded = dict(PAINTED, **{LABEL_PR: LabelInfo("LP", "grey")})
+    ops = reconcile([item()], Snapshot(ROOT, {}, {}, {}, labels=faded), today=TODAY)
+    assert [(op.name, op.id) for op in ops if isinstance(op, SetLabel)] == [(LABEL_PR, "LP")]
+
+
+def test_kind_is_a_label_so_a_filter_can_see_it():
+    pair = [item(), item(gh_id="I_b", number=43, is_pr=True)]
+    ops = reconcile(pair, Snapshot(ROOT, {}, {}, {}, labels=PAINTED), today=TODAY)
+    assert [op.labels for op in ops if isinstance(op, CreateTask)] == [(LABEL_ISSUE,), (LABEL_PR,)]
+
+
+def test_an_issue_turned_pr_swaps_its_label_and_keeps_manual_ones():
+    one = item()
+    snap = settled(one)
+    snap.tasks[one.gh_id] = TaskInfo(
+        "T", one.content, "R", "S", one.priority, one.deadline, ("waiting", LABEL_ISSUE)
+    )
+    ops = reconcile([item(is_pr=True)], snap, today=TODAY)
+    assert kinds(ops) == ["UpdateTask"]
+    assert ops[0].labels == ("waiting", LABEL_PR)

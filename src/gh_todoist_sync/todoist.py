@@ -6,12 +6,14 @@ from datetime import date
 from typing import Any
 
 from .models import (
+    LABEL_COLORS,
     MARKER_EMPTY,
     MARKER_ORG,
     MARKER_REPO,
     MARKER_ROOT,
     MARKER_TASK,
     ROOT_NAME,
+    LabelInfo,
     ProjectInfo,
     SectionInfo,
     Snapshot,
@@ -36,6 +38,7 @@ from .reconcile import (
     RenameSection,
     SectionRef,
     SetDescription,
+    SetLabel,
     UpdateTask,
 )
 from .rest import Client, cli_token
@@ -64,13 +67,18 @@ def _deadline(raw: Any) -> date | None:
     return date.fromisoformat(value) if value else None
 
 
+def _labels(api: Client) -> dict[str, LabelInfo]:
+    raw = _all(api, "/labels")
+    return {r["name"]: LabelInfo(r["id"], r["color"]) for r in raw if r["name"] in LABEL_COLORS}
+
+
 def snapshot(api: Client) -> Snapshot:
     projects = _all(api, "/projects")
     root = next(
         (p for p in projects if marker_value(p.get("description"), MARKER_ROOT) is not None), None
     )
     if root is None:
-        return Snapshot(root=None, orgs={}, sections={}, tasks={})
+        return Snapshot(root=None, orgs={}, sections={}, tasks={}, labels=_labels(api))
 
     tree = [root] + [p for p in projects if p.get("parent_id") == root["id"]]
     sections: dict[tuple[str, str], SectionInfo] = {}
@@ -99,6 +107,7 @@ def snapshot(api: Client) -> Snapshot:
                     section_id=raw.get("section_id"),
                     priority=raw["priority"],
                     deadline=_deadline(raw.get("deadline")),
+                    labels=tuple(raw.get("labels") or ()),
                 )
     return Snapshot(
         root=ProjectInfo(root["id"], root["name"]),
@@ -111,6 +120,7 @@ def snapshot(api: Client) -> Snapshot:
         tasks=tasks,
         occupied=frozenset(occupied),
         empty_since=empty_since,
+        labels=_labels(api),
     )
 
 
@@ -170,6 +180,7 @@ class Applier:
                 description=description,
                 priority=priority,
                 deadline=deadline,
+                labels=labels,
                 project=project,
                 section=section,
             ):
@@ -178,15 +189,19 @@ class Applier:
                     content=content,
                     description=description,
                     priority=priority,
+                    labels=list(labels),
                     project_id=self.project(project),
                     section_id=self.section(section),
                     deadline_date=deadline.isoformat() if deadline else None,
                 )
-            case UpdateTask(id=task_id, content=content, priority=priority, deadline=deadline):
+            case UpdateTask(
+                id=task_id, content=content, priority=priority, deadline=deadline, labels=labels
+            ):
                 api.post(
                     f"/tasks/{task_id}",
                     content=content,
                     priority=priority,
+                    labels=list(labels),
                     deadline_date=deadline.isoformat() if deadline else None,
                 )
             case MoveTask(id=task_id, project=project, section=section):
@@ -201,6 +216,9 @@ class Applier:
                 api.post(f"/{kind}/{object_id}", description=description)
             case Delete(id=object_id, kind=kind):
                 api.delete(f"/{kind}/{object_id}")
+            case SetLabel(id=label_id, name=name, color=color):
+                path = f"/labels/{label_id}" if label_id else "/labels"
+                api.post(path, name=name, color=color)
 
 
 def apply(api: Client, ops: list[Op]) -> None:

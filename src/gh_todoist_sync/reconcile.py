@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from .models import (
+    LABEL_COLORS,
     MARKER_EMPTY,
     Item,
     ProjectInfo,
@@ -105,6 +106,7 @@ class CreateTask:
     description: str
     priority: int
     deadline: date | None
+    labels: tuple[str, ...]
     project: ProjectRef
     section: SectionRef
 
@@ -115,6 +117,7 @@ class UpdateTask:
     content: str
     priority: int
     deadline: date | None
+    labels: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +149,15 @@ class Delete:
     name: str
 
 
+@dataclass(frozen=True, slots=True)
+class SetLabel:
+    """Creates the label, or repaints one Todoist made by hand when first used."""
+
+    id: str | None
+    name: str
+    color: str
+
+
 type Op = (
     CreateRoot
     | CreateOrgProject
@@ -158,6 +170,7 @@ type Op = (
     | CompleteTask
     | SetDescription
     | Delete
+    | SetLabel
 )
 
 
@@ -226,16 +239,19 @@ def _task_ops(items: list[Item], snap: Snapshot, refs: _Refs) -> Iterator[Op]:
                 item.description,
                 item.priority,
                 item.deadline,
+                item.labels(),
                 refs.project(item),
                 refs.section(item),
             )
             continue
+        labels = item.labels(task.labels)
         if (
             task.content != item.content
             or task.priority != item.priority
             or task.deadline != item.deadline
+            or task.labels != labels
         ):
-            yield UpdateTask(task.id, item.content, item.priority, item.deadline)
+            yield UpdateTask(task.id, item.content, item.priority, item.deadline, labels)
         section = refs.section(item)
         if not isinstance(section, Existing) or task.section_id != section.id:
             yield MoveTask(task.id, refs.project(item), section)
@@ -251,6 +267,14 @@ def _completion_ops(items: list[Item], snap: Snapshot, cap: int) -> list[Op]:
             f"degraded GitHub response, not finished work. Re-run with --force if intended."
         )
     return [CompleteTask(t.id, t.content) for t in stale]
+
+
+def _label_ops(snap: Snapshot) -> Iterator[Op]:
+    """Todoist invents a label the first time a task names one, in plain grey."""
+    for name, color in sorted(LABEL_COLORS.items()):
+        have = snap.labels.get(name)
+        if have is None or have.color != color:
+            yield SetLabel(have.id if have else None, name, color)
 
 
 def _cleanup_ops(
@@ -309,6 +333,7 @@ def reconcile(
 ) -> list[Op]:
     refs = _Refs(snap)
     ops: list[Op] = [] if snap.root else [CreateRoot()]
+    ops += _label_ops(snap)
     ops += _org_ops(items, snap)
     ops += _section_ops(items, refs)
     ops += _task_ops(items, snap, refs)
