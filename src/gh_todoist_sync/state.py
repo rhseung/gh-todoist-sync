@@ -6,9 +6,8 @@ local file instead, so the descriptions hold only what a person would want to
 read.
 
 The trade is that this file is now load bearing: lose it and the next run does
-not recognise the tree it built, so it builds a second one alongside. It is
-small and rewritten on every run, so back it up with the rest of the home
-directory and that stays theoretical.
+not recognise the tree it built, so it builds a second one alongside. Keeping it
+in the checkout, gitignored, is what makes it easy to find and back up.
 """
 
 from __future__ import annotations
@@ -18,7 +17,22 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-PATH = Path.home() / ".local/state/gh-todoist-sync/state.json"
+
+def _default_path() -> Path:
+    """Beside pyproject.toml when run from a checkout, else under the home dir.
+
+    The launchd agent runs the checkout's own venv, so it lands in the project.
+    A copy installed somewhere else has no checkout to sit in, and falling back
+    beats quietly starting a second state file inside its own venv -- two files
+    means two trees in Todoist.
+    """
+    root = Path(__file__).resolve().parents[2]
+    if (root / "pyproject.toml").exists():
+        return root / "state.json"
+    return Path.home() / ".local/state/gh-todoist-sync/state.json"
+
+
+PATH = _default_path()
 
 
 @dataclass(slots=True)

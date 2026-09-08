@@ -22,9 +22,13 @@ Todoist가 마크다운을 렌더링하므로 `#61`이 이슈로 가는 링크�
 ## 설치
 
 ```bash
-uv tool install .
-gh-todoist-sync install        # launchd 등록, 120초마다 실행
+uv sync
+uv run gh-todoist-sync install   # launchd 등록, 120초마다 실행
 ```
+
+체크아웃 안에서 쓴다. 상태 파일(아래)이 체크아웃 옆에 살기 때문에, 같은 패키지를
+`uv tool install`로 한 벌 더 깔아두면 상태 파일이 둘로 갈려 Todoist에 트리가 두 개
+생긴다. 설치는 한 곳만 유지한다.
 
 `gh`와 `td`가 로그인돼 있으면 설정할 게 없다. 토큰을 직접 주고 싶으면
 `GITHUB_TOKEN` / `TODOIST_API_TOKEN` 환경변수가 우선한다.
@@ -57,31 +61,50 @@ gh-todoist-sync status         # 동작 여부, 마지막 종료 코드
 id 기반 매칭에 필요한 값이 한 번에 온다. search API는 이 id들을 안 주므로, 거기서 새로
 발견한 레포만 `GET /repos/{owner}/{repo}`로 한 번 더 조회한다 (실행 내 캐시).
 
+아카이브된 레포는 건너뛴다. 손댈 수 없는 작업이라 띄워봐야 소음이다.
+
 | 필드 | 규칙 |
 |---|---|
 | 우선순위 | PR = p2, 이슈 = p4 |
+| 라벨 | PR = `gh-pr`(보라), 이슈 = `gh-issue`(초록). 손으로 붙인 라벨은 남긴다 |
 | 마감일 | GitHub milestone의 `due_on`. 없으면 비움 |
 
 ## 매핑을 어디에 저장하나
 
-**로컬 상태 파일이 없다.** GitHub의 숫자 id를 Todoist description 첫 줄에 심는다.
+체크아웃 루트의 `state.json` 하나. gitignore 대상이다.
 
-| Todoist 객체 | description 마커 |
+```json
+{
+  "root": "6hRV382RrRFWWGm6",
+  "orgs":     { "54899579": "6hRV38rc6xr6JW7H" },
+  "sections": { "954621090": "6hRV3C3FR86wWWqq" },
+  "tasks":    { "I_kwDOSpcotc8AAAABPpYuuQ": "6hRV3Mh4X85Xj5Fq" },
+  "empty_since": { "6hRV3Frffr8qqPgf": "2026-09-08" }
+}
+```
+
+id로 찾으므로 이름이 바뀌어도 안 깨진다. GitHub에서 레포나 org 이름을 바꾸면 Todoist
+쪽 이름을 GitHub에 맞춰 고치고, Todoist에서 섹션 이름을 손으로 바꿔놔도 되돌린다.
+Todoist에서 뭔가를 손으로 지우면 상태 파일에서도 지워지고 다음 실행에 다시 만든다.
+
+Todoist description에는 **사람이 볼 것만** 남는다.
+
+| Todoist 객체 | description |
 |---|---|
-| 부모 프로젝트 | `gh-root: 1` |
-| org 서브프로젝트 | `gh-org-id: 54899579` |
-| 레포 섹션 | `gh-repo-id: 954621090` |
-| 태스크 | `gh-id: I_kwDOSpcotc8AAAABPpYuuQ` + 둘째 줄에 이슈 URL |
+| 부모 프로젝트 | 없음 |
+| org 서브프로젝트 | `[gsainfoteam](https://github.com/gsainfoteam)` |
+| 레포 섹션 | `[account-fe](https://github.com/gsainfoteam/account-fe)` |
+| 태스크 | 없음 (이슈 링크는 이름에 이미 있다) |
 
-이렇게 한 이유:
+맨 URL이 아니라 마크다운 링크로 쓴다. 맨 URL을 넣으면 Todoist가 제목을 붙인 링크로
+바꿔버려서, 매 폴링마다 달라 보이고 description을 영원히 다시 쓴다.
 
-- **이름이 바뀌어도 안 깨진다.** GitHub에서 레포나 org 이름을 바꾸면 id로 찾아서 Todoist
-  쪽 이름을 GitHub에 맞춰 고친다. 반대로 Todoist에서 섹션 이름을 손으로 바꿔놔도 다음
-  실행에 되돌아온다.
-- **머신을 갈아엎어도 그대로 동작한다.** 복구할 상태 파일이 없으니 드리프트라는 개념
-  자체가 없다.
-- **부모 프로젝트 이름도 하드코딩이 아니다.** `gh-root: 1` 마커로 찾으므로 Todoist에서
-  "GitHub"을 다른 이름으로 바꿔도 계속 붙는다.
+전에는 이 매핑을 description에 `gh-id: I_kwDO...` 같은 마커로 심었다. 상태 파일이
+필요 없다는 장점이 있었지만 태스크마다 그 줄이 눈에 걸렸다. 지금 방식의 대가는 이렇다.
+
+- **상태 파일을 잃으면** 다음 실행이 기존 트리를 못 알아보고 옆에 하나 더 만든다.
+  옛 태스크는 시야 밖이라 완료 처리도 안 되고 그냥 남는다. 손으로 지워야 한다.
+- **머신 한 대 전제다.** 두 곳에서 돌리면 각자 상태 파일을 들고 서로 다른 트리를 만든다.
 
 ## 구조
 
@@ -94,9 +117,10 @@ id 기반 매칭에 필요한 값이 한 번에 온다. search API는 이 id들�
 | `todoist.py` | Snapshot 조회 + op 실행 |
 | `agent.py` | launchd plist 생성·등록 (`plistlib`) |
 | `cli.py` | typer 명령 |
+| `state.py` | `state.json` 읽기·쓰기. GitHub id ↔ Todoist id |
 
 SDK를 안 쓴다. `todoist-api-python`의 `Section` 모델에는 `description` 필드가 아예
-없어서 (읽기도 쓰기도) 마커를 심을 수 없고, 그렇다고 섹션만 원시 REST로 처리하면 한
+없어서 섹션에 레포 링크를 달 수 없고, 그렇다고 섹션만 원시 REST로 처리하면 한
 서비스에 클라이언트가 둘 생긴다. 양쪽 API가 base URL·인증 헤더·페이지네이션 방식만
 다르므로 `rest.Client` 하나로 통일했다.
 
@@ -111,15 +135,18 @@ reconcile이 내는 op는 전부 frozen dataclass다. 프로젝트를 만들기 
 - **완료 상한 20개.** 한 실행에서 완료 대상이 20개를 넘으면 중단한다. org 권한이 갑자기
   빠지거나 페이지가 잘려 온 상황이지, 내가 정말 그만큼 끝냈을 리는 없다. 의도한
   대량 완료라면 `--force`.
-- **`gh-id:` 마커가 없는 항목은 절대 건드리지 않는다.** GitHub 프로젝트 안에 손으로
+- **상태 파일이 모르는 항목은 절대 건드리지 않는다.** GitHub 프로젝트 안에 손으로
   메모를 추가해도 안전하다.
-- 삭제는 하지 않는다. GitHub에서 사라진 작업은 완료 처리만 한다.
+- **태스크는 지우지 않는다.** GitHub에서 사라진 작업은 완료 처리만 한다.
+- **빈 섹션·서브프로젝트는 유예 기간을 두고 지운다.** 처음 빈 날짜를 상태 파일에
+  적어두고, 그대로 7일(`--grace`)을 넘긴 것만 지운다. 오늘 이슈가 다 닫힌 레포를
+  매 폴링마다 지웠다 만들었다 하지 않기 위해서다. 안에 뭐가 하나라도 남아 있으면
+  — 우리가 만든 게 아니어도 — 지우지 않는다. 컨테이너를 지우면 내용물이 같이 날아간다.
 
 ## 알려진 한계
 
-- **레포가 org 사이를 이동하면** 옛 프로젝트의 섹션이 빈 채로 남는다. 태스크는 새 섹션으로
-  따라가지만 껍데기는 손으로 지워야 한다. 섹션을 자동으로 지우면 그 안 태스크까지 날아갈
-  위험이 있어 일부러 안 한다.
+- **상태 파일이 단일 실패 지점이다.** 잃으면 트리가 복제된다. 위 "매핑을 어디에
+  저장하나" 참고.
 - **웹훅이 아니라 폴링이다.** 최대 2분 지연. 진짜 웹훅을 하려면 24/7 공개 HTTPS
   엔드포인트와 org admin 권한이 필요한데, 소속 org 중 일부는 member 권한뿐이라 어차피
   구멍이 남는다.
@@ -134,9 +161,10 @@ uv run ruff check .
 uv run ruff format .
 ```
 
-테스트가 검증하는 것: 멱등성, 신규 이슈, 레포 rename이 섹션만 바꾸는지, 제목 변경,
-org 서브프로젝트 생성, org rename, 완료 처리, 대량 완료 가드, 마커 없는 항목 무시,
-엉뚱한 섹션에 있는 태스크 이동.
+테스트가 검증하는 것: 멱등성, 신규 이슈, 레포 rename이 섹션과 링크만 바꾸는지, 제목
+변경, org 서브프로젝트 생성, org rename, 완료 처리, 대량 완료 가드, 엉뚱한 섹션에 있는
+태스크 이동, 유예 기간(도장·만료·재사용·손으로 넣은 항목이 섹션을 살리는지), 라벨 색과
+교체, 상태 파일 왕복.
 
 ## 문제가 생기면
 
@@ -148,8 +176,9 @@ td auth status                       # Todoist 인증
 tail -50 ~/Library/Logs/gh-todoist-sync.log
 ```
 
-Todoist 구조를 통째로 다시 만들고 싶으면 Todoist에서 "GitHub" 프로젝트를 지우고 한 번
-실행하면 된다. 상태 파일이 없으므로 처음부터 다시 만든다.
+Todoist 구조를 통째로 다시 만들고 싶으면 Todoist에서 "GitHub" 프로젝트를 지우고
+`state.json`도 지운 뒤 한 번 실행한다. 둘 중 하나만 지우면 안 된다 — 프로젝트만 지우면
+상태 파일이 없는 id를 가리키고, 상태 파일만 지우면 트리가 복제된다.
 
 ## 라이선스
 

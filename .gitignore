@@ -12,3 +12,7 @@ wheels/
 # Tooling caches
 .pytest_cache/
 .ruff_cache/
+
+# Runtime state: which Todoist object stands for which piece of GitHub
+state.json
+state.json.tmp
