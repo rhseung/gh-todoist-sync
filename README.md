@@ -55,6 +55,11 @@ launchd 는 `.venv/bin/gh-todoist-sync` 를 직접 호출하므로 `uv run` 이 
 | 로그인한 사용자에게 assign 된 open issue 와 PR | `GET /issues?filter=assigned&state=open` |
 | review 요청받은 PR | `GET /search/issues?q=is:pr is:open review-requested:@me` |
 | 사용자가 연 open PR | `GET /search/issues?q=is:pr is:open author:@me` |
+| 사용자가 열었고 아무도 맡지 않은 open issue | `GET /search/issues?q=is:issue is:open author:@me no:assignee` |
+
+마지막 줄에 `no:assignee` 가 붙어 있는 이유는, 내가 연 issue 라도 다른 사람이 assign 되어
+있으면 그 사람의 작업이기 때문입니다. 내가 assign 된 issue 는 위의 assign 목록으로 이미
+들어옵니다.
 
 archive 된 repo 는 수집 대상에서 제외합니다. 어차피 손댈 수 없는 작업이므로 목록에 남아
 있으면 방해가 되기 때문입니다.
