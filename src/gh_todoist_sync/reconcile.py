@@ -278,45 +278,47 @@ def _depths(items: list[Item]) -> dict[str, int]:
     return depth
 
 
-def _heights(items: list[Item]) -> dict[str, int]:
-    """How far the chain waiting on each item reaches.
+def _reach(items: list[Item]) -> dict[str, int]:
+    """How many items are waiting on each one, counting the whole chain behind it.
 
     Depth alone drops everything startable into one bucket ordered by number, so
-    work that unblocks three other issues sits below work that unblocks none.
-    Height is the mirror measure: the longer the queue behind an item, the more
-    finishing it is worth, so it goes first among equals.
+    work that frees three issues sits below work that frees none. Reach is the
+    mirror measure. Counting the closure rather than the direct edges means a
+    chain of three and a fan-out to three both weigh what they actually cost.
     """
     by_id = {item.gh_id: item for item in items}
-    height: dict[str, int] = {}
+    reach: dict[str, frozenset[str]] = {}
 
-    def walk(gh_id: str, seen: frozenset[str]) -> int:
-        if gh_id in height:
-            return height[gh_id]
+    def walk(gh_id: str, seen: frozenset[str]) -> frozenset[str]:
+        if gh_id in reach:
+            return reach[gh_id]
         item = by_id.get(gh_id)
         if item is None or gh_id in seen:
-            return 0
-        found = max((1 + walk(r.gh_id, seen | {gh_id}) for r in item.blocking), default=0)
-        height[gh_id] = found
+            return frozenset()
+        found = frozenset[str]().union(
+            *({r.gh_id} | walk(r.gh_id, seen | {gh_id}) for r in item.blocking), frozenset()
+        )
+        reach[gh_id] = found
         return found
 
     for item in items:
         walk(item.gh_id, frozenset())
-    return height
+    return {gh_id: len(behind) for gh_id, behind in reach.items()}
 
 
-def _order_key(depth: dict[str, int], height: dict[str, int]):
-    """What is startable first, then what unblocks the most, then issue number."""
+def _order_key(depth: dict[str, int], reach: dict[str, int]):
+    """What is startable first, then what frees the most, then issue number."""
     return lambda i: (
         i.owner_login,
         i.repo_name,
         depth.get(i.gh_id, 0),
-        -height.get(i.gh_id, 0),
+        -reach.get(i.gh_id, 0),
         i.number,
     )
 
 
 def _order_ops(
-    items: list[Item], snap: Snapshot, depth: dict[str, int], height: dict[str, int]
+    items: list[Item], snap: Snapshot, depth: dict[str, int], reach: dict[str, int]
 ) -> Iterator[Op]:
     """One reorder per section whose sequence no longer matches the plan.
 
@@ -329,7 +331,7 @@ def _order_ops(
     for item in items:
         groups.setdefault((item.owner_login, item.repo_name), []).append(item)
     for _, group in sorted(groups.items()):
-        want = [i.gh_id for i in sorted(group, key=_order_key(depth, height))]
+        want = [i.gh_id for i in sorted(group, key=_order_key(depth, reach))]
         present = [gh_id for gh_id in want if gh_id in snap.tasks]
         current = sorted(present, key=lambda g: snap.tasks[g].child_order)
         if current != present or len(present) != len(want):
@@ -341,9 +343,9 @@ def _task_ops(
     snap: Snapshot,
     refs: _Refs,
     depth: dict[str, int],
-    height: dict[str, int],
+    reach: dict[str, int],
 ) -> Iterator[Op]:
-    for item in sorted(items, key=_order_key(depth, height)):
+    for item in sorted(items, key=_order_key(depth, reach)):
         task = snap.tasks.get(item.gh_id)
         if task is None:
             yield CreateTask(
@@ -460,9 +462,9 @@ def reconcile(  # noqa: PLR0913
     ops += _label_ops(snap)
     ops += _org_ops(items, snap)
     ops += _section_ops(items, refs)
-    depth, height = _depths(items), _heights(items)
-    ops += _task_ops(items, snap, refs, depth, height)
-    ops += _order_ops(items, snap, depth, height)
+    depth, reach = _depths(items), _reach(items)
+    ops += _task_ops(items, snap, refs, depth, reach)
+    ops += _order_ops(items, snap, depth, reach)
     ops += _completion_ops(items, snap, cap, discarded)
     ops += _cleanup_ops(items, snap, refs, today or date.today(), grace)
     return ops

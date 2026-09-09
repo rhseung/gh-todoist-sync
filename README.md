@@ -68,8 +68,30 @@ archive 된 repo는 수집 대상에서 제외합니다. 어차피 손댈 수 �
 | 필드 | 규칙 |
 | --- | --- |
 | 우선순위 | PR은 p2, issue는 p4 |
-| label | PR은 `gh-pr` (보라), issue는 `gh-issue` (초록). 직접 붙인 label은 그대로 유지합니다 |
+| label | PR은 `gh-pr` (보라), issue는 `gh-issue` (초록), 막힌 issue는 `gh-blocked` (빨강). 직접 붙인 label은 그대로 유지합니다 |
+| 설명 | 열려 있는 의존 관계. `blocked by #39`, `blocks #30, #40` 꼴이고 다른 저장소는 `owner/repo#12` 로 적습니다 |
 | 마감일 | GitHub milestone의 `due_on` 값을 사용합니다. 값이 없으면 비워 둡니다 |
+
+## 정렬
+
+같은 section 안에서 task는 이슈 번호가 아니라 의존 관계 순으로 놓입니다. 축이 셋입니다.
+
+| 축 | 뜻 |
+| --- | --- |
+| depth | 앞을 막고 있는 열린 이슈의 사슬 길이. 0이면 지금 착수할 수 있습니다 |
+| reach | 뒤에서 기다리는 이슈의 수. 사슬 전체를 세므로 셋을 연달아 푸는 일과 셋을 한꺼번에 푸는 일이 같은 무게가 됩니다 |
+| 번호 | 나머지가 같을 때 쓰는 마지막 기준 |
+
+그래서 남을 가장 많이 푸는 일이 맨 위에, 아무것도 막지 않고 막히지도 않은 일이 가운데,
+막힌 일이 맨 아래에 옵니다. 막힌 task에는 `gh-blocked`가 붙으므로 Todoist 필터에
+`!@gh-blocked`를 걸면 지금 손댈 수 있는 것만 남습니다.
+
+닫힌 이슈는 더 이상 막지 않으므로 관계에서 빠집니다. 의존 관계는 GraphQL의 `blockedBy`
+와 `blocking`으로 한 번에 100개씩 읽으므로 이슈가 늘어도 호출이 이슈 수만큼 늘지
+않습니다.
+
+REST 쪽에 순서를 세우는 자리가 없어서 재정렬만 sync 명령을 씁니다. 순서가 어긋난
+section에만 한 번씩 나갑니다.
 
 ## 안전장치
 
@@ -115,6 +137,17 @@ uv run pytest        # 네트워크를 사용하지 않음
 uv run ruff check .
 uv run ruff format .
 ```
+
+코드를 고치기 전에 launchd 를 먼저 내립니다.
+
+```bash
+launchctl bootout gui/$(id -u)/local.gh-todoist-sync   # 고치기 전
+launchctl kickstart -k gui/$(id -u)/local.gh-todoist-sync   # 끝난 뒤
+```
+
+launchd 가 부르는 `.venv/bin/gh-todoist-sync` 는 이 저장소를 editable 로 가리킵니다.
+그래서 파일을 저장하는 순간부터 120초마다 작성 중인 코드가 실제 Todoist에 적용되고,
+`--dry-run` 으로 계획을 먼저 확인하려던 절차가 의미를 잃습니다.
 
 `reconcile.py`가 순수 함수로 작성되어 있어서 test가 가볍습니다. 이렇게 구현한 이유는
 각 모듈의 docstring에 적어 두었습니다.

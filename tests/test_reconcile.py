@@ -359,10 +359,45 @@ def test_an_order_that_already_holds_is_left_alone():
     assert [op for op in reconcile([one], settled(one)) if isinstance(op, ReorderTasks)] == []
 
 
-def test_what_unblocks_the_most_goes_first_among_equals():
+def test_what_frees_the_most_goes_first_among_equals():
     # Both can be started today; one clears the way for another, one for nobody.
     lone = item(gh_id="I_a", number=1)
     opener = item(gh_id="I_b", number=9, blocking=(Ref("I_c", 3, "rhseung/rds"),))
     waiting = item(gh_id="I_c", number=3, blocked_by=(Ref("I_b", 9, "rhseung/rds"),))
     ops = reconcile([lone, opener, waiting], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
     assert [op.gh_ids for op in ops if isinstance(op, ReorderTasks)] == [("I_b", "I_a", "I_c")]
+
+
+def test_freeing_two_beats_freeing_one():
+    # Same depth, same chain length: the count of what waits is what separates them.
+    wide = item(
+        gh_id="I_a",
+        number=9,
+        blocking=(Ref("I_c", 1, "rhseung/rds"), Ref("I_d", 2, "rhseung/rds")),
+    )
+    narrow = item(gh_id="I_b", number=3, blocking=(Ref("I_e", 4, "rhseung/rds"),))
+    behind = [
+        item(gh_id="I_c", number=1, blocked_by=(Ref("I_a", 9, "rhseung/rds"),)),
+        item(gh_id="I_d", number=2, blocked_by=(Ref("I_a", 9, "rhseung/rds"),)),
+        item(gh_id="I_e", number=4, blocked_by=(Ref("I_b", 3, "rhseung/rds"),)),
+    ]
+    ops = reconcile([narrow, wide, *behind], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
+    order = next(op.gh_ids for op in ops if isinstance(op, ReorderTasks))
+    assert order[:2] == ("I_a", "I_b")
+
+
+def test_a_chain_outweighs_a_single_dependent():
+    # A -> B -> C frees two in the end, so it beats D, which frees only one.
+    a = item(gh_id="I_a", number=9, blocking=(Ref("I_b", 1, "rhseung/rds"),))
+    b = item(
+        gh_id="I_b",
+        number=1,
+        blocked_by=(Ref("I_a", 9, "rhseung/rds"),),
+        blocking=(Ref("I_c", 2, "rhseung/rds"),),
+    )
+    c = item(gh_id="I_c", number=2, blocked_by=(Ref("I_b", 1, "rhseung/rds"),))
+    d = item(gh_id="I_d", number=3, blocking=(Ref("I_e", 4, "rhseung/rds"),))
+    e = item(gh_id="I_e", number=4, blocked_by=(Ref("I_d", 3, "rhseung/rds"),))
+    ops = reconcile([d, a, b, c, e], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
+    order = next(op.gh_ids for op in ops if isinstance(op, ReorderTasks))
+    assert order[:2] == ("I_a", "I_d")
