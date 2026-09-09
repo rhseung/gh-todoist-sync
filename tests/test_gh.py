@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from gh_todoist_sync import gh
 
 REPO = {
@@ -57,6 +59,51 @@ def test_unassigned_issues_i_opened_are_collected():
     assert items["I_b"].number == 38
 
 
-if __name__ == "__main__":
-    test_unassigned_issues_i_opened_are_collected()
-    print("ok")
+def test_discarded_picks_out_what_was_never_done():
+    nodes = [
+        {"id": "I_planned", "stateReason": "COMPLETED"},
+        {"id": "I_dropped", "stateReason": "NOT_PLANNED"},
+        {"id": "I_dupe", "stateReason": "DUPLICATE"},
+        {"id": "PR_merged", "state": "MERGED"},
+        {"id": "PR_given_up", "state": "CLOSED"},
+        {"id": "PR_still_open", "state": "OPEN"},
+        None,  # gone, or no longer visible to this token
+    ]
+
+    class GraphQL:
+        def post(self, path, **body):
+            assert path == "/graphql"
+            return {"data": {"nodes": nodes}}
+
+    ids = {n["id"] for n in nodes if n} | {"I_gone"}
+    assert gh.discarded(GraphQL(), ids) == frozenset({"I_dropped", "I_dupe", "PR_given_up"})
+
+
+def test_discarded_skips_the_call_when_nothing_vanished():
+    class Explodes:
+        def post(self, *a, **k):
+            raise AssertionError("no ids, no call")
+
+    assert gh.discarded(Explodes(), set()) == frozenset()
+
+
+def test_discarded_survives_an_id_github_no_longer_resolves():
+    """A deleted issue answers with a null node and an error, not a dead run."""
+
+    class Partial:
+        def post(self, path, **body):
+            return {
+                "data": {"nodes": [None, {"id": "I_dropped", "stateReason": "NOT_PLANNED"}]},
+                "errors": [{"type": "NOT_FOUND", "path": ["nodes", 0]}],
+            }
+
+    assert gh.discarded(Partial(), {"I_gone", "I_dropped"}) == frozenset({"I_dropped"})
+
+
+def test_discarded_stops_the_run_when_nothing_came_back():
+    class Refused:
+        def post(self, path, **body):
+            return {"errors": [{"message": "Bad credentials"}]}
+
+    with pytest.raises(RuntimeError, match="Bad credentials"):
+        gh.discarded(Refused(), {"I_a"})

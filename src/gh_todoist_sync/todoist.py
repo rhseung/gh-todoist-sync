@@ -21,6 +21,7 @@ from .reconcile import (
     CreateSection,
     CreateTask,
     Delete,
+    DeleteTask,
     Existing,
     MarkEmpty,
     MoveTask,
@@ -225,6 +226,9 @@ class Applier:
                 )
             case CompleteTask(id=task_id, gh_id=gh_id):
                 api.post(f"/tasks/{task_id}/close")
+                state.tasks.pop(gh_id, None)
+            case DeleteTask(id=task_id, gh_id=gh_id):
+                api.delete(f"/tasks/{task_id}")
                 state.tasks.pop(gh_id, None)
             case SetDescription(id=object_id, kind=kind, description=description):
                 api.post(f"/{kind}/{object_id}", description=description)

@@ -21,6 +21,16 @@ SEARCHES = (
     "is:issue is:open author:@me no:assignee",
 )
 
+# GraphQL takes node ids straight, which is all the state file keeps, so nothing
+# has to be parsed back out of a task's text to ask about it. 100 is the cap the
+# nodes() field enforces.
+NODES_PER_CALL = 100
+# How the two kinds say the work never happened. An issue spells out its reason;
+# a PR only closes, and MERGED is the separate state that means it landed, so a
+# plain CLOSED is a PR that was given up on.
+DISCARDED_REASONS = {"NOT_PLANNED", "DUPLICATE"}
+DISCARDED_STATE = "CLOSED"
+
 
 def client() -> Client:
     return Client(BASE_URL, cli_token("GITHUB_TOKEN", ["gh", "auth", "token"]), **HEADERS)
@@ -90,3 +100,38 @@ def desired(api: Client) -> list[Item]:
             items[payload["node_id"]] = _item(payload, repos[full_name], is_pr=is_pr)
 
     return list(items.values())
+
+
+def _never_happened(node: dict[str, Any]) -> bool:
+    return node.get("stateReason") in DISCARDED_REASONS or node.get("state") == DISCARDED_STATE
+
+
+def discarded(api: Client, gh_ids: set[str]) -> frozenset[str]:
+    """Of the ids that fell out of the goal, the ones closed as not-work.
+
+    An issue closed as not planned or duplicate, and a PR closed without being
+    merged, are work that never happened; completing the Todoist task would file
+    a false record of having done it. Every other way an id can vanish -- closed
+    as completed, merged, unassigned, repo archived, access lost -- still reads
+    as a completion, and an id GitHub no longer serves comes back null and falls
+    through to one.
+    """
+    query = (
+        "query($ids: [ID!]!) { nodes(ids: $ids) {"
+        " ... on Issue { id stateReason }"
+        " ... on PullRequest { id state } } }"
+    )
+    ids = sorted(gh_ids)
+    out: set[str] = set()
+    for start in range(0, len(ids), NODES_PER_CALL):
+        body = api.post(
+            "/graphql", query=query, variables={"ids": ids[start : start + NODES_PER_CALL]}
+        )
+        # An id that no longer resolves -- issue deleted, access lost -- comes
+        # back as a null node next to an error, with the rest of the batch
+        # intact. That is the ordinary case here, so only a reply carrying no
+        # data at all counts as a failure worth stopping the run for.
+        if (data := body.get("data")) is None:
+            raise RuntimeError(f"GitHub GraphQL refused the node lookup: {body.get('errors')}")
+        out |= {n["id"] for n in data["nodes"] if n and _never_happened(n)}
+    return frozenset(out)

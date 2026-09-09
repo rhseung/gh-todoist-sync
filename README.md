@@ -3,8 +3,9 @@
 GitHub 에서 로그인한 사용자에게 assign 된 issue 와 PR 을 Todoist 로 옮깁니다.
 
 동기화는 GitHub 에서 Todoist 로 향하는 한 방향으로만 이루어집니다. issue 가 닫히거나
-assign 이 해제되면 Todoist task 도 완료 처리됩니다. 반대 방향으로는 동기화되지 않습니다.
-즉, Todoist 에서 task 를 완료해도 GitHub issue 는 그대로 남습니다.
+assign 이 해제되면 Todoist task 도 완료 처리됩니다. not planned 나 duplicate 로 닫힌
+issue 와 merge 되지 않고 닫힌 PR 만 완료가 아니라 삭제합니다. 반대 방향으로는 동기화되지 않습니다. 즉, Todoist 에서
+task 를 완료해도 GitHub issue 는 그대로 남습니다.
 
 ```
 GitHub                          <- 부모 project
@@ -80,7 +81,13 @@ GitHub 호출이 하나라도 실패하면 Todoist 에는 아무것도 기록하
 때문입니다. 실제로 그런 경우라면 `--force` 를 사용합니다.
 
 state 파일에 없는 항목은 건드리지 않습니다. 따라서 GitHub project 안에 메모를 직접 적어
-두어도 안전합니다. task 는 삭제하지 않고 완료 처리만 합니다.
+두어도 안전합니다.
+
+GitHub 에서 사라진 항목은 완료 처리합니다. 다만 not planned 나 duplicate 로 닫힌 issue,
+merge 되지 않고 닫힌 PR 은 완료가 아니라 삭제합니다. 하지 않기로 한 일을 완료 목록에
+남기면 실제로 끝낸 작업과 섞여서 기록이 틀리기 때문입니다. 이 판정은 GraphQL 로 issue 의
+`stateReason` 과 PR 의 `state` 를 확인해서 내립니다. merge 된 PR 은 `MERGED` 라는 별도
+state 이므로 완료로 남습니다.
 
 비어 있는 section 이나 sub-project 는 곧바로 삭제하지 않고, 처음 비게 된 날짜를 기록해
 둡니다. 그 상태로 7일 (`--grace`) 이 지나야 삭제합니다. 오늘 issue 가 모두 닫힌 repo 를

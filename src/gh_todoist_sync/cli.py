@@ -31,14 +31,17 @@ def sync(
     """Bring Todoist in line with GitHub."""
     # GitHub is read first and on its own: if it fails, nothing is written, so a
     # degraded response can never be mistaken for "all my work is done".
+    current = state.load()
     with gh.client() as api:
         items = gh.desired(api)
+        discarded = gh.discarded(api, set(current.tasks) - {i.gh_id for i in items})
 
-    current = state.load()
     with todoist.client() as api:
         try:
             cap = 10**9 if force else COMPLETE_CAP
-            ops = reconcile(items, todoist.snapshot(api, current), cap=cap, grace=grace)
+            ops = reconcile(
+                items, todoist.snapshot(api, current), cap=cap, grace=grace, discarded=discarded
+            )
         except SyncError as error:
             typer.secho(str(error), fg=typer.colors.RED, err=True)
             raise typer.Exit(1) from error

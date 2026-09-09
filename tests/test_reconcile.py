@@ -134,6 +134,13 @@ def test_vanished_issue_is_completed():
     assert ops[0].id == "T"
 
 
+def test_issue_closed_as_not_planned_is_deleted():
+    one = item()
+    ops = reconcile([], settled(one), discarded=frozenset({one.gh_id}))
+    assert kinds(ops) == ["DeleteTask"]
+    assert ops[0].id == "T"
+
+
 def test_bulk_completion_is_refused():
     tasks = {f"I_{n}": TaskInfo(f"T{n}", "c", "R", "S", PRIORITY_ISSUE, None) for n in range(21)}
     snap = Snapshot(ROOT, {}, {}, tasks, labels=PAINTED)

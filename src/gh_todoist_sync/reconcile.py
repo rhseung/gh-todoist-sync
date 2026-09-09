@@ -127,6 +127,15 @@ class CompleteTask:
 
 
 @dataclass(frozen=True, slots=True)
+class DeleteTask:
+    """For work that never happened: a completion would claim it did."""
+
+    id: str
+    gh_id: str
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
 class SetDescription:
     """Stamps or clears the empty marker. `kind` is the REST collection."""
 
@@ -169,6 +178,7 @@ type Op = (
     | UpdateTask
     | MoveTask
     | CompleteTask
+    | DeleteTask
     | SetDescription
     | Delete
     | MarkEmpty
@@ -259,7 +269,9 @@ def _task_ops(items: list[Item], snap: Snapshot, refs: _Refs) -> Iterator[Op]:
             yield MoveTask(task.id, refs.project(item), section)
 
 
-def _completion_ops(items: list[Item], snap: Snapshot, cap: int) -> list[Op]:
+def _completion_ops(
+    items: list[Item], snap: Snapshot, cap: int, discarded: frozenset[str]
+) -> list[Op]:
     """Anything GitHub no longer hands me."""
     goal = {i.gh_id for i in items}
     stale = [(gh_id, t) for gh_id, t in sorted(snap.tasks.items()) if gh_id not in goal]
@@ -268,7 +280,12 @@ def _completion_ops(items: list[Item], snap: Snapshot, cap: int) -> list[Op]:
             f"{len(stale)} tasks would be completed (cap {cap}). That usually means a "
             f"degraded GitHub response, not finished work. Re-run with --force if intended."
         )
-    return [CompleteTask(t.id, gh_id, t.content) for gh_id, t in stale]
+    return [
+        DeleteTask(t.id, gh_id, t.content)
+        if gh_id in discarded
+        else CompleteTask(t.id, gh_id, t.content)
+        for gh_id, t in stale
+    ]
 
 
 def _label_ops(snap: Snapshot) -> Iterator[Op]:
@@ -325,12 +342,14 @@ def _cleanup_ops(
     return ops
 
 
-def reconcile(
+def reconcile(  # noqa: PLR0913
     items: list[Item],
     snap: Snapshot,
+    *,
     cap: int = COMPLETE_CAP,
     grace: int = GRACE_DAYS,
     today: date | None = None,
+    discarded: frozenset[str] = frozenset(),
 ) -> list[Op]:
     refs = _Refs(snap)
     ops: list[Op] = [] if snap.root else [CreateRoot()]
@@ -338,6 +357,6 @@ def reconcile(
     ops += _org_ops(items, snap)
     ops += _section_ops(items, refs)
     ops += _task_ops(items, snap, refs)
-    ops += _completion_ops(items, snap, cap)
+    ops += _completion_ops(items, snap, cap, discarded)
     ops += _cleanup_ops(items, snap, refs, today or date.today(), grace)
     return ops
