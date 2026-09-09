@@ -19,7 +19,23 @@ PRIORITY_PR = 3  # p2
 # GitHub itself uses for the two icons, so the sidebar reads at a glance.
 LABEL_PR = "gh-pr"
 LABEL_ISSUE = "gh-issue"
-LABEL_COLORS = {LABEL_PR: "grape", LABEL_ISSUE: "green"}
+# Blocked work is still mine, so it keeps its kind label and gains this one. A
+# filter of `!@gh-blocked` is then the list of what can actually be started.
+LABEL_BLOCKED = "gh-blocked"
+LABEL_COLORS = {LABEL_PR: "grape", LABEL_ISSUE: "green", LABEL_BLOCKED: "red"}
+
+
+@dataclass(frozen=True, slots=True)
+class Ref:
+    """Another GitHub issue this one depends on, or that depends on it."""
+
+    gh_id: str
+    number: int
+    repo: str  # owner/name
+
+    def mention(self, here: str) -> str:
+        # Same repo reads as #12; anywhere else needs the full name to resolve.
+        return f"#{self.number}" if self.repo == here else f"{self.repo}#{self.number}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +53,25 @@ class Item:
     title: str
     url: str
     deadline: date | None
+    # Only open dependencies are carried: a closed blocker no longer blocks.
+    blocked_by: tuple[Ref, ...] = ()
+    blocking: tuple[Ref, ...] = ()
+
+    @property
+    def full_repo(self) -> str:
+        return f"{self.owner_login}/{self.repo_name}"
+
+    @property
+    def description(self) -> str:
+        """What this waits on, so the task answers that without opening GitHub."""
+        lines = []
+        if self.blocked_by:
+            lines.append(
+                "blocked by " + ", ".join(r.mention(self.full_repo) for r in self.blocked_by)
+            )
+        if self.blocking:
+            lines.append("blocks " + ", ".join(r.mention(self.full_repo) for r in self.blocking))
+        return "\n".join(lines)
 
     @property
     def content(self) -> str:
@@ -72,8 +107,9 @@ class Item:
         return LABEL_PR if self.is_pr else LABEL_ISSUE
 
     def labels(self, current: tuple[str, ...] = ()) -> tuple[str, ...]:
-        """This item's kind, on top of whatever labels were added by hand."""
-        return (*(x for x in current if x not in LABEL_COLORS), self.label)
+        """This item's kind and state, on top of whatever was added by hand."""
+        ours = (self.label, *((LABEL_BLOCKED,) if self.blocked_by else ()))
+        return (*(x for x in current if x not in LABEL_COLORS), *ours)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +136,8 @@ class TaskInfo:
     priority: int
     deadline: date | None
     labels: tuple[str, ...] = ()
+    description: str = ""
+    child_order: int = 0
 
 
 @dataclass(frozen=True, slots=True)

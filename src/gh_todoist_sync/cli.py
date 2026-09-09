@@ -33,7 +33,7 @@ def sync(
     # degraded response can never be mistaken for "all my work is done".
     current = state.load()
     with gh.client() as api:
-        items = gh.desired(api)
+        items = gh.relations(api, gh.desired(api))
         discarded = gh.discarded(api, set(current.tasks) - {i.gh_id for i in items})
 
     with todoist.client() as api:

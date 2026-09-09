@@ -96,6 +96,7 @@ class RenameSection:
 class CreateTask:
     gh_id: str
     content: str
+    description: str
     priority: int
     deadline: date | None
     labels: tuple[str, ...]
@@ -107,6 +108,7 @@ class CreateTask:
 class UpdateTask:
     id: str
     content: str
+    description: str
     priority: int
     deadline: date | None
     labels: tuple[str, ...]
@@ -168,6 +170,13 @@ class SetLabel:
     color: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReorderTasks:
+    """The order a section's tasks should sit in, as GitHub ids."""
+
+    gh_ids: tuple[str, ...]
+
+
 type Op = (
     CreateRoot
     | CreateOrgProject
@@ -177,6 +186,7 @@ type Op = (
     | CreateTask
     | UpdateTask
     | MoveTask
+    | ReorderTasks
     | CompleteTask
     | DeleteTask
     | SetDescription
@@ -242,13 +252,104 @@ def _section_ops(items: list[Item], refs: _Refs) -> Iterator[Op]:
             yield RenameSection(have.id, item.repo_name)
 
 
-def _task_ops(items: list[Item], snap: Snapshot, refs: _Refs) -> Iterator[Op]:
-    for item in sorted(items, key=lambda i: (i.owner_login, i.repo_name, i.number)):
+def _depths(items: list[Item]) -> dict[str, int]:
+    """How many dependency hops sit in front of each item.
+
+    Depth 0 is work with nothing open ahead of it. A blocker outside this list --
+    someone else's issue, a repo I hold no assignment in -- still counts as one
+    hop, because it still has to close first. A dependency cycle would never
+    settle, so a revisited id contributes nothing and the walk terminates.
+    """
+    by_id = {item.gh_id: item for item in items}
+    depth: dict[str, int] = {}
+
+    def walk(gh_id: str, seen: frozenset[str]) -> int:
+        if gh_id in depth:
+            return depth[gh_id]
+        item = by_id.get(gh_id)
+        if item is None or gh_id in seen:
+            return 0
+        found = max((1 + walk(r.gh_id, seen | {gh_id}) for r in item.blocked_by), default=0)
+        depth[gh_id] = found
+        return found
+
+    for item in items:
+        walk(item.gh_id, frozenset())
+    return depth
+
+
+def _heights(items: list[Item]) -> dict[str, int]:
+    """How far the chain waiting on each item reaches.
+
+    Depth alone drops everything startable into one bucket ordered by number, so
+    work that unblocks three other issues sits below work that unblocks none.
+    Height is the mirror measure: the longer the queue behind an item, the more
+    finishing it is worth, so it goes first among equals.
+    """
+    by_id = {item.gh_id: item for item in items}
+    height: dict[str, int] = {}
+
+    def walk(gh_id: str, seen: frozenset[str]) -> int:
+        if gh_id in height:
+            return height[gh_id]
+        item = by_id.get(gh_id)
+        if item is None or gh_id in seen:
+            return 0
+        found = max((1 + walk(r.gh_id, seen | {gh_id}) for r in item.blocking), default=0)
+        height[gh_id] = found
+        return found
+
+    for item in items:
+        walk(item.gh_id, frozenset())
+    return height
+
+
+def _order_key(depth: dict[str, int], height: dict[str, int]):
+    """What is startable first, then what unblocks the most, then issue number."""
+    return lambda i: (
+        i.owner_login,
+        i.repo_name,
+        depth.get(i.gh_id, 0),
+        -height.get(i.gh_id, 0),
+        i.number,
+    )
+
+
+def _order_ops(
+    items: list[Item], snap: Snapshot, depth: dict[str, int], height: dict[str, int]
+) -> Iterator[Op]:
+    """One reorder per section whose sequence no longer matches the plan.
+
+    Sorting by depth puts what can be started now at the top, which is the point:
+    the section reads as a queue instead of as issue numbers. Creating tasks in
+    order would only ever fix the run that created them, so the order is stated
+    outright each time it drifts.
+    """
+    groups: dict[tuple[str, str], list[Item]] = {}
+    for item in items:
+        groups.setdefault((item.owner_login, item.repo_name), []).append(item)
+    for _, group in sorted(groups.items()):
+        want = [i.gh_id for i in sorted(group, key=_order_key(depth, height))]
+        present = [gh_id for gh_id in want if gh_id in snap.tasks]
+        current = sorted(present, key=lambda g: snap.tasks[g].child_order)
+        if current != present or len(present) != len(want):
+            yield ReorderTasks(tuple(want))
+
+
+def _task_ops(
+    items: list[Item],
+    snap: Snapshot,
+    refs: _Refs,
+    depth: dict[str, int],
+    height: dict[str, int],
+) -> Iterator[Op]:
+    for item in sorted(items, key=_order_key(depth, height)):
         task = snap.tasks.get(item.gh_id)
         if task is None:
             yield CreateTask(
                 item.gh_id,
                 item.content,
+                item.description,
                 item.priority,
                 item.deadline,
                 item.labels(),
@@ -259,11 +360,14 @@ def _task_ops(items: list[Item], snap: Snapshot, refs: _Refs) -> Iterator[Op]:
         labels = item.labels(task.labels)
         if (
             task.content != item.content
+            or task.description != item.description
             or task.priority != item.priority
             or task.deadline != item.deadline
             or task.labels != labels
         ):
-            yield UpdateTask(task.id, item.content, item.priority, item.deadline, labels)
+            yield UpdateTask(
+                task.id, item.content, item.description, item.priority, item.deadline, labels
+            )
         section = refs.section(item)
         if not isinstance(section, Existing) or task.section_id != section.id:
             yield MoveTask(task.id, refs.project(item), section)
@@ -356,7 +460,9 @@ def reconcile(  # noqa: PLR0913
     ops += _label_ops(snap)
     ops += _org_ops(items, snap)
     ops += _section_ops(items, refs)
-    ops += _task_ops(items, snap, refs)
+    depth, height = _depths(items), _heights(items)
+    ops += _task_ops(items, snap, refs, depth, height)
+    ops += _order_ops(items, snap, depth, height)
     ops += _completion_ops(items, snap, cap, discarded)
     ops += _cleanup_ops(items, snap, refs, today or date.today(), grace)
     return ops

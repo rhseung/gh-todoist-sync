@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from typing import Any
 
-from .models import Item
+from .models import Item, Ref
 from .rest import Client, cli_token
 
 BASE_URL = "https://api.github.com"
@@ -30,6 +31,16 @@ NODES_PER_CALL = 100
 # plain CLOSED is a PR that was given up on.
 DISCARDED_REASONS = {"NOT_PLANNED", "DUPLICATE"}
 DISCARDED_STATE = "CLOSED"
+
+# GitHub caps a dependency list well below this, so one page is the whole list.
+EDGES_PER_ITEM = 20
+_EDGE = (
+    f"(first: {EDGES_PER_ITEM}) {{ nodes {{ id number state repository {{ nameWithOwner }} }} }}"
+)
+RELATIONS_QUERY = (
+    "query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id"
+    f" blockedBy{_EDGE} blocking{_EDGE} }} }} }}"
+)
 
 
 def client() -> Client:
@@ -135,3 +146,43 @@ def discarded(api: Client, gh_ids: set[str]) -> frozenset[str]:
             raise RuntimeError(f"GitHub GraphQL refused the node lookup: {body.get('errors')}")
         out |= {n["id"] for n in data["nodes"] if n and _never_happened(n)}
     return frozenset(out)
+
+
+def _open_refs(nodes: list[dict[str, Any]]) -> tuple[Ref, ...]:
+    # A closed blocker no longer blocks, and a closed dependent no longer waits.
+    return tuple(
+        Ref(n["id"], n["number"], n["repository"]["nameWithOwner"])
+        for n in nodes
+        if n["state"] == "OPEN"
+    )
+
+
+def relations(api: Client, items: list[Item]) -> list[Item]:
+    """The same items, carrying their open dependency edges.
+
+    Batched through the node lookup `discarded` already uses, so this costs one
+    call per hundred issues rather than one per issue. Pull requests carry no
+    dependencies, so they are left out of the ask entirely.
+    """
+    ids = sorted(item.gh_id for item in items if not item.is_pr)
+    edges: dict[str, tuple[tuple[Ref, ...], tuple[Ref, ...]]] = {}
+    for start in range(0, len(ids), NODES_PER_CALL):
+        body = api.post(
+            "/graphql",
+            query=RELATIONS_QUERY,
+            variables={"ids": ids[start : start + NODES_PER_CALL]},
+        )
+        if (data := body.get("data")) is None:
+            raise RuntimeError(f"GitHub GraphQL refused the relation lookup: {body.get('errors')}")
+        for node in data["nodes"]:
+            if node:
+                edges[node["id"]] = (
+                    _open_refs(node["blockedBy"]["nodes"]),
+                    _open_refs(node["blocking"]["nodes"]),
+                )
+    return [
+        replace(item, blocked_by=edge[0], blocking=edge[1])
+        if (edge := edges.get(item.gh_id))
+        else item
+        for item in items
+    ]

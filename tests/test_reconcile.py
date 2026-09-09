@@ -7,6 +7,7 @@ from datetime import date, timedelta
 import pytest
 
 from gh_todoist_sync.models import (
+    LABEL_BLOCKED,
     LABEL_ISSUE,
     LABEL_PR,
     PRIORITY_ISSUE,
@@ -14,6 +15,7 @@ from gh_todoist_sync.models import (
     Item,
     LabelInfo,
     ProjectInfo,
+    Ref,
     SectionInfo,
     Snapshot,
     TaskInfo,
@@ -22,6 +24,7 @@ from gh_todoist_sync.reconcile import (
     GRACE_DAYS,
     CreateTask,
     MarkEmpty,
+    ReorderTasks,
     SetLabel,
     SyncError,
     reconcile,
@@ -30,7 +33,11 @@ from gh_todoist_sync.reconcile import (
 ROOT = ProjectInfo("R", "GitHub")
 TODAY = date(2026, 9, 8)
 # Painted already, so _label_ops stays quiet and the other tests read clean.
-PAINTED = {LABEL_PR: LabelInfo("LP", "grape"), LABEL_ISSUE: LabelInfo("LI", "green")}
+PAINTED = {
+    LABEL_PR: LabelInfo("LP", "grape"),
+    LABEL_ISSUE: LabelInfo("LI", "green"),
+    LABEL_BLOCKED: LabelInfo("LB", "red"),
+}
 
 
 def item(**overrides) -> Item:
@@ -60,7 +67,14 @@ def settled(one: Item) -> Snapshot:
         },
         tasks={
             one.gh_id: TaskInfo(
-                "T", one.content, "R", "S", one.priority, one.deadline, one.labels()
+                "T",
+                one.content,
+                "R",
+                "S",
+                one.priority,
+                one.deadline,
+                one.labels(),
+                one.description,
             )
         },
         occupied=frozenset({"R", "S"}),
@@ -79,13 +93,13 @@ def test_steady_state_is_a_no_op():
 
 def test_empty_todoist_builds_the_tree():
     ops = reconcile([item()], Snapshot(None, {}, {}, {}, labels=PAINTED))
-    assert kinds(ops) == ["CreateRoot", "CreateSection", "CreateTask"]
+    assert kinds(ops) == ["CreateRoot", "CreateSection", "CreateTask", "ReorderTasks"]
 
 
 def test_new_issue_in_a_known_repo():
     one = item()
     ops = reconcile([one, item(gh_id="I_b", number=43)], settled(one))
-    assert kinds(ops) == ["CreateTask"]
+    assert kinds(ops) == ["CreateTask", "ReorderTasks"]
 
 
 def test_repo_rename_touches_only_the_section():
@@ -116,7 +130,7 @@ def test_org_repo_gets_a_sub_project():
         deadline=date(2026, 10, 1),
     )
     ops = reconcile([org], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
-    assert kinds(ops) == ["CreateOrgProject", "CreateSection", "CreateTask"]
+    assert kinds(ops) == ["CreateOrgProject", "CreateSection", "CreateTask", "ReorderTasks"]
     assert ops[2].deadline == date(2026, 10, 1)
     assert ops[2].priority == PRIORITY_PR
 
@@ -193,8 +207,8 @@ def test_section_empty_past_the_grace_period_is_deleted():
 def test_refilled_section_loses_its_stamp():
     snap = empty_section(TODAY - timedelta(days=99))
     ops = reconcile([item()], snap, today=TODAY)
-    assert kinds(ops) == ["CreateTask", "MarkEmpty"]
-    assert ops[1] == MarkEmpty("S", None)
+    assert kinds(ops) == ["CreateTask", "ReorderTasks", "MarkEmpty"]
+    assert ops[2] == MarkEmpty("S", None)
 
 
 def test_an_unmarked_task_keeps_the_section_alive():
@@ -225,7 +239,7 @@ def test_deleting_an_org_project_takes_its_section():
 def test_descriptions_lead_with_a_link_to_github():
     org = item(owner_id="8", owner_login="gsainfoteam", owner_is_org=True)
     ops = reconcile([org], Snapshot(ROOT, {}, {}, {}, labels=PAINTED), today=TODAY)
-    assert kinds(ops) == ["CreateOrgProject", "CreateSection", "CreateTask"]
+    assert kinds(ops) == ["CreateOrgProject", "CreateSection", "CreateTask", "ReorderTasks"]
     # Explicit markdown link, not a bare URL -- Todoist retitles a bare URL and
     # the description would then differ from what reconcile wants on every poll.
     assert ops[0].description == "[gsainfoteam](https://github.com/gsainfoteam)"
@@ -247,14 +261,21 @@ def test_org_rename_rewrites_the_project_link():
         labels=PAINTED,
     )
     ops = reconcile([org], snap, today=TODAY)
-    assert kinds(ops) == ["RenameProject", "CreateSection", "CreateTask", "SetDescription"]
-    assert ops[3].description == "[gsa-new](https://github.com/gsa-new)"
+    assert kinds(ops) == [
+        "RenameProject",
+        "CreateSection",
+        "CreateTask",
+        "ReorderTasks",
+        "SetDescription",
+    ]
+    assert ops[4].description == "[gsa-new](https://github.com/gsa-new)"
 
 
 def test_labels_are_painted_so_the_two_kinds_read_apart():
     # Todoist invents the label in grey the first time a task names it.
     ops = reconcile([item()], Snapshot(ROOT, {}, {}, {}), today=TODAY)
     assert [(op.name, op.color, op.id) for op in ops if isinstance(op, SetLabel)] == [
+        (LABEL_BLOCKED, "red", None),
         (LABEL_ISSUE, "green", None),
         (LABEL_PR, "grape", None),
     ]
@@ -278,3 +299,70 @@ def test_an_issue_turned_pr_swaps_its_label_and_keeps_manual_ones():
     ops = reconcile([item(is_pr=True)], snap, today=TODAY)
     assert kinds(ops) == ["UpdateTask"]
     assert ops[0].labels == ("waiting", LABEL_PR)
+
+
+# --- dependencies -----------------------------------------------------------
+
+
+def test_a_blocker_sorts_ahead_of_what_it_blocks():
+    # Numbers run the other way on purpose: depth has to beat the tie-break.
+    blocker = item(gh_id="I_a", number=90)
+    blocked = item(gh_id="I_b", number=10, blocked_by=(Ref("I_a", 90, "rhseung/rds"),))
+    ops = reconcile([blocked, blocker], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
+    assert [op.gh_id for op in ops if isinstance(op, CreateTask)] == ["I_a", "I_b"]
+    assert [op.gh_ids for op in ops if isinstance(op, ReorderTasks)] == [("I_a", "I_b")]
+
+
+def test_a_chain_orders_end_to_end():
+    a = item(gh_id="I_a", number=3)
+    b = item(gh_id="I_b", number=2, blocked_by=(Ref("I_a", 3, "rhseung/rds"),))
+    c = item(gh_id="I_c", number=1, blocked_by=(Ref("I_b", 2, "rhseung/rds"),))
+    ops = reconcile([c, b, a], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
+    assert [op.gh_ids for op in ops if isinstance(op, ReorderTasks)] == [("I_a", "I_b", "I_c")]
+
+
+def test_a_blocker_outside_the_list_still_pushes_the_item_down():
+    # Someone else's issue never shows up as a task, but it still has to close.
+    free = item(gh_id="I_a", number=90)
+    waiting = item(gh_id="I_b", number=10, blocked_by=(Ref("I_x", 5, "other/repo"),))
+    ops = reconcile([waiting, free], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
+    assert [op.gh_ids for op in ops if isinstance(op, ReorderTasks)] == [("I_a", "I_b")]
+
+
+def test_a_dependency_cycle_terminates():
+    a = item(gh_id="I_a", number=1, blocked_by=(Ref("I_b", 2, "rhseung/rds"),))
+    b = item(gh_id="I_b", number=2, blocked_by=(Ref("I_a", 1, "rhseung/rds"),))
+    ops = reconcile([a, b], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
+    assert len([op for op in ops if isinstance(op, CreateTask)]) == 2
+
+
+def test_a_blocked_item_says_so_in_its_labels_and_description():
+    one = item(
+        blocked_by=(Ref("I_x", 5, "rhseung/rds"), Ref("I_y", 7, "other/repo")),
+        blocking=(Ref("I_z", 9, "rhseung/rds"),),
+    )
+    ops = reconcile([one], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
+    created = next(op for op in ops if isinstance(op, CreateTask))
+    assert created.description == "blocked by #5, other/repo#7\nblocks #9"
+    assert LABEL_BLOCKED in created.labels
+
+
+def test_an_unblocked_item_carries_no_blocked_label_and_no_description():
+    ops = reconcile([item()], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
+    created = next(op for op in ops if isinstance(op, CreateTask))
+    assert created.description == ""
+    assert LABEL_BLOCKED not in created.labels
+
+
+def test_an_order_that_already_holds_is_left_alone():
+    one = item()
+    assert [op for op in reconcile([one], settled(one)) if isinstance(op, ReorderTasks)] == []
+
+
+def test_what_unblocks_the_most_goes_first_among_equals():
+    # Both can be started today; one clears the way for another, one for nobody.
+    lone = item(gh_id="I_a", number=1)
+    opener = item(gh_id="I_b", number=9, blocking=(Ref("I_c", 3, "rhseung/rds"),))
+    waiting = item(gh_id="I_c", number=3, blocked_by=(Ref("I_b", 9, "rhseung/rds"),))
+    ops = reconcile([lone, opener, waiting], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
+    assert [op.gh_ids for op in ops if isinstance(op, ReorderTasks)] == [("I_b", "I_a", "I_c")]

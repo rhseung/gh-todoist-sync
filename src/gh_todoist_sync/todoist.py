@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Any
+from uuid import uuid4
 
 from .models import (
     LABEL_COLORS,
@@ -32,6 +33,7 @@ from .reconcile import (
     ProjectRef,
     RenameProject,
     RenameSection,
+    ReorderTasks,
     SectionRef,
     SetDescription,
     SetLabel,
@@ -117,6 +119,8 @@ def snapshot(api: Client, state: State) -> Snapshot:
                     priority=raw["priority"],
                     deadline=_deadline(raw.get("deadline")),
                     labels=tuple(raw.get("labels") or ()),
+                    description=raw.get("description") or "",
+                    child_order=raw.get("child_order") or 0,
                 )
     for todoist_id in [*state.sections.values(), *state.tasks.values()]:
         if todoist_id not in seen:
@@ -193,6 +197,7 @@ class Applier:
             case CreateTask(
                 gh_id=gh_id,
                 content=content,
+                description=description,
                 priority=priority,
                 deadline=deadline,
                 labels=labels,
@@ -202,6 +207,7 @@ class Applier:
                 state.tasks[gh_id] = api.post(
                     "/tasks",
                     content=content,
+                    description=description,
                     priority=priority,
                     labels=list(labels),
                     project_id=self.project(project),
@@ -209,15 +215,41 @@ class Applier:
                     deadline_date=deadline.isoformat() if deadline else None,
                 )["id"]
             case UpdateTask(
-                id=task_id, content=content, priority=priority, deadline=deadline, labels=labels
+                id=task_id,
+                content=content,
+                description=description,
+                priority=priority,
+                deadline=deadline,
+                labels=labels,
             ):
                 api.post(
                     f"/tasks/{task_id}",
                     content=content,
+                    description=description,
                     priority=priority,
                     labels=list(labels),
                     deadline_date=deadline.isoformat() if deadline else None,
                 )
+            case ReorderTasks(gh_ids=gh_ids):
+                # The REST surface has no place to state an order, so this is the
+                # one sync command the tool sends. Ids created earlier in this
+                # same run are already in state, so a fresh task lands in place.
+                ordered = [
+                    {"id": state.tasks[gh_id], "child_order": index}
+                    for index, gh_id in enumerate(gh_ids)
+                    if gh_id in state.tasks
+                ]
+                if ordered:
+                    api.post(
+                        "/sync",
+                        commands=[
+                            {
+                                "type": "item_reorder",
+                                "uuid": str(uuid4()),
+                                "args": {"items": ordered},
+                            }
+                        ],
+                    )
             case MoveTask(id=task_id, project=project, section=section):
                 api.post(
                     f"/tasks/{task_id}/move",
