@@ -401,3 +401,18 @@ def test_a_chain_outweighs_a_single_dependent():
     ops = reconcile([d, a, b, c, e], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
     order = next(op.gh_ids for op in ops if isinstance(op, ReorderTasks))
     assert order[:2] == ("I_a", "I_d")
+
+
+def test_the_most_blocked_sinks_to_the_bottom():
+    # Both wait, but one waits on two things, so it is the furthest from ready.
+    a = item(gh_id="I_a", number=1, blocking=(Ref("I_c", 3, "rhseung/rds"),))
+    b = item(gh_id="I_b", number=2, blocking=(Ref("I_d", 4, "rhseung/rds"),))
+    one = item(gh_id="I_c", number=3, blocked_by=(Ref("I_a", 1, "rhseung/rds"),))
+    two = item(
+        gh_id="I_d",
+        number=4,
+        blocked_by=(Ref("I_a", 1, "rhseung/rds"), Ref("I_b", 2, "rhseung/rds")),
+    )
+    ops = reconcile([two, one, b, a], Snapshot(ROOT, {}, {}, {}, labels=PAINTED))
+    order = next(op.gh_ids for op in ops if isinstance(op, ReorderTasks))
+    assert order[-1] == "I_d"

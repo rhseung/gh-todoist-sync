@@ -252,73 +252,51 @@ def _section_ops(items: list[Item], refs: _Refs) -> Iterator[Op]:
             yield RenameSection(have.id, item.repo_name)
 
 
-def _depths(items: list[Item]) -> dict[str, int]:
-    """How many dependency hops sit in front of each item.
+def _closure(items: list[Item], follow: str) -> dict[str, int]:
+    """How many items lie behind each one along `blocked_by` or `blocking`.
 
-    Depth 0 is work with nothing open ahead of it. A blocker outside this list --
-    someone else's issue, a repo I hold no assignment in -- still counts as one
-    hop, because it still has to close first. A dependency cycle would never
-    settle, so a revisited id contributes nothing and the walk terminates.
+    Counting blockers transitively is itself a topological order: if B blocks A,
+    then A waits on everything B waits on and on B besides, so A's count is
+    strictly the larger. That makes a separate depth measure unnecessary.
+
+    A dependency outside this list -- someone else's issue, a repo I hold no
+    assignment in -- still counts, because it still has to close. A cycle would
+    never settle, so a revisited id contributes nothing and the walk terminates.
     """
     by_id = {item.gh_id: item for item in items}
-    depth: dict[str, int] = {}
-
-    def walk(gh_id: str, seen: frozenset[str]) -> int:
-        if gh_id in depth:
-            return depth[gh_id]
-        item = by_id.get(gh_id)
-        if item is None or gh_id in seen:
-            return 0
-        found = max((1 + walk(r.gh_id, seen | {gh_id}) for r in item.blocked_by), default=0)
-        depth[gh_id] = found
-        return found
-
-    for item in items:
-        walk(item.gh_id, frozenset())
-    return depth
-
-
-def _reach(items: list[Item]) -> dict[str, int]:
-    """How many items are waiting on each one, counting the whole chain behind it.
-
-    Depth alone drops everything startable into one bucket ordered by number, so
-    work that frees three issues sits below work that frees none. Reach is the
-    mirror measure. Counting the closure rather than the direct edges means a
-    chain of three and a fan-out to three both weigh what they actually cost.
-    """
-    by_id = {item.gh_id: item for item in items}
-    reach: dict[str, frozenset[str]] = {}
+    behind: dict[str, frozenset[str]] = {}
 
     def walk(gh_id: str, seen: frozenset[str]) -> frozenset[str]:
-        if gh_id in reach:
-            return reach[gh_id]
+        if gh_id in behind:
+            return behind[gh_id]
         item = by_id.get(gh_id)
         if item is None or gh_id in seen:
             return frozenset()
         found = frozenset[str]().union(
-            *({r.gh_id} | walk(r.gh_id, seen | {gh_id}) for r in item.blocking), frozenset()
+            *({r.gh_id} | walk(r.gh_id, seen | {gh_id}) for r in getattr(item, follow)),
+            frozenset(),
         )
-        reach[gh_id] = found
+        behind[gh_id] = found
         return found
 
     for item in items:
         walk(item.gh_id, frozenset())
-    return {gh_id: len(behind) for gh_id, behind in reach.items()}
+    return {gh_id: len(found) for gh_id, found in behind.items()}
 
 
-def _order_key(depth: dict[str, int], reach: dict[str, int]):
-    """What is startable first, then what frees the most, then issue number."""
+def _order_key(waits: dict[str, int], frees: dict[str, int]):
+    """Least blocked first, then what frees the most, then issue number."""
     return lambda i: (
         i.owner_login,
         i.repo_name,
-        depth.get(i.gh_id, 0),
-        -reach.get(i.gh_id, 0),
+        waits.get(i.gh_id, 0),
+        -frees.get(i.gh_id, 0),
         i.number,
     )
 
 
 def _order_ops(
-    items: list[Item], snap: Snapshot, depth: dict[str, int], reach: dict[str, int]
+    items: list[Item], snap: Snapshot, waits: dict[str, int], frees: dict[str, int]
 ) -> Iterator[Op]:
     """One reorder per section whose sequence no longer matches the plan.
 
@@ -331,7 +309,7 @@ def _order_ops(
     for item in items:
         groups.setdefault((item.owner_login, item.repo_name), []).append(item)
     for _, group in sorted(groups.items()):
-        want = [i.gh_id for i in sorted(group, key=_order_key(depth, reach))]
+        want = [i.gh_id for i in sorted(group, key=_order_key(waits, frees))]
         present = [gh_id for gh_id in want if gh_id in snap.tasks]
         current = sorted(present, key=lambda g: snap.tasks[g].child_order)
         if current != present or len(present) != len(want):
@@ -342,10 +320,10 @@ def _task_ops(
     items: list[Item],
     snap: Snapshot,
     refs: _Refs,
-    depth: dict[str, int],
-    reach: dict[str, int],
+    waits: dict[str, int],
+    frees: dict[str, int],
 ) -> Iterator[Op]:
-    for item in sorted(items, key=_order_key(depth, reach)):
+    for item in sorted(items, key=_order_key(waits, frees)):
         task = snap.tasks.get(item.gh_id)
         if task is None:
             yield CreateTask(
@@ -462,9 +440,9 @@ def reconcile(  # noqa: PLR0913
     ops += _label_ops(snap)
     ops += _org_ops(items, snap)
     ops += _section_ops(items, refs)
-    depth, reach = _depths(items), _reach(items)
-    ops += _task_ops(items, snap, refs, depth, reach)
-    ops += _order_ops(items, snap, depth, reach)
+    waits, frees = _closure(items, "blocked_by"), _closure(items, "blocking")
+    ops += _task_ops(items, snap, refs, waits, frees)
+    ops += _order_ops(items, snap, waits, frees)
     ops += _completion_ops(items, snap, cap, discarded)
     ops += _cleanup_ops(items, snap, refs, today or date.today(), grace)
     return ops
